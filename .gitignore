@@ -1,0 +1,13 @@
+data/
+results/
+figures/
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+venv/
+*.log
+*.tmp
+*.DS_Store

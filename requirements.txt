@@ -1,0 +1,23 @@
+# Core data
+pandas>=2.0
+numpy>=1.26
+
+# Machine learning routers (Experiment 4)
+scikit-learn>=1.4
+xgboost>=2.0
+
+# Clustering (Experiment 2)
+scipy>=1.12
+
+# Visualization
+matplotlib>=3.8
+seaborn>=0.13
+
+# Anthropic API (Experiment 5)
+anthropic>=0.25
+
+# Image handling (agentic router base64 encoding)
+Pillow>=10.0
+
+# Testing
+pytest>=8.0
