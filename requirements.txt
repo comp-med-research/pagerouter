@@ -16,8 +16,17 @@ seaborn>=0.13
 # Anthropic API (Experiment 5)
 anthropic>=0.25
 
+# Multi-provider VLM agents (Experiment 6 ablation)
+openai>=1.30
+google-generativeai>=0.8
+
 # Image handling (agentic router base64 encoding)
 Pillow>=10.0
+
+# Visual diagnostics / KNN router (Experiment 6)
+torch>=2.0
+open-clip-torch>=2.24
+faiss-cpu>=1.7
 
 # Testing
 pytest>=8.0

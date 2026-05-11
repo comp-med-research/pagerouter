@@ -286,3 +286,63 @@ def plot_agentic_confusion_matrix(
     # TODO: sklearn confusion_matrix, rows = oracle, cols = agent
     # TODO: normalise by row so diagonal shows per-model accuracy
     raise NotImplementedError
+
+
+def plot_agent_agreement_heatmap(
+    ablation_df: "pd.DataFrame",
+    out_path: str | Path,
+) -> None:
+    """Pairwise agent agreement heatmap for the multi-agent ablation.
+
+    Cell [i, j] = fraction of pages where agent i and agent j selected the
+    same model (0 = never agree, 1 = always agree; diagonal = 1 by definition).
+
+    Parameters
+    ----------
+    ablation_df:
+        DataFrame loaded from ablation_results.jsonl with columns
+        [page_id, agent_name, parsed_model].
+    out_path:
+        Output file path (e.g. figures/agent_agreement_heatmap.pdf).
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import seaborn as sns
+
+    pivot = ablation_df.pivot_table(
+        index="page_id", columns="agent_name", values="parsed_model", aggfunc="first"
+    )
+    agents = sorted(pivot.columns.tolist())
+    pivot = pivot[agents]
+
+    n = len(agents)
+    agreement = np.zeros((n, n))
+    for i, a in enumerate(agents):
+        for j, b in enumerate(agents):
+            shared = pivot[[a, b]].dropna()
+            if len(shared) == 0:
+                agreement[i, j] = float("nan")
+            else:
+                agreement[i, j] = (shared[a] == shared[b]).mean()
+
+    agreement_df = pd.DataFrame(agreement, index=agents, columns=agents)
+
+    fig, ax = plt.subplots(figsize=(max(5, n * 1.1), max(4, n * 0.9)))
+    sns.heatmap(
+        agreement_df,
+        ax=ax,
+        annot=True,
+        fmt=".2f",
+        cmap="YlGnBu",
+        vmin=0.0,
+        vmax=1.0,
+        linewidths=0.5,
+        cbar_kws={"label": "Fraction of pages in agreement"},
+    )
+    ax.set_title("Agent pairwise agreement rate")
+    ax.set_xlabel("Agent")
+    ax.set_ylabel("Agent")
+    plt.tight_layout()
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
