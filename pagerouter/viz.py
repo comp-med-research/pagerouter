@@ -109,6 +109,152 @@ def plot_clustering_dendrogram(
     plt.close(fig)
 
 
+def plot_oracle_vs_models(
+    matrix: pd.DataFrame,
+    out_path: str | Path,
+    title: str | None = None,
+    *,
+    best_model_legend: str | None = None,
+    legend_loc: str = "upper right",
+    dataset_scope: str | None = None,
+    stratum_context: bool = False,
+    metric_display_name: str | None = None,
+    x_axis_label: str | None = None,
+) -> None:
+    """Horizontal bars: each model's mean NED vs oracle-1 (Experiment 3).
+
+    Oracle-1 = mean over pages of max_m NED(page, m) — per-page winner, not one model.
+    Model bars = column mean (one fixed model on all pages).
+
+    dataset_scope:
+        If ``best_model_legend`` is None, choose wording: ``\"omni\"``, ``\"real5\"``, or ``None`` (generic).
+    stratum_context:
+        If True (stratum slice plots), label the reference line as best model **within that slice**.
+    metric_display_name:
+        Short name for non-NED scores (e.g. ``\"CDM\"``, ``\"TEDS\"``) — used in the oracle legend
+        and default x-axis label unless ``x_axis_label`` is set.
+    x_axis_label:
+        Overrides the x-axis label (default: ``\"Mean NED\"`` or ``f\"Mean {metric_display_name}\"``).
+    """
+    import matplotlib.pyplot as plt
+
+    oracle_one = float(matrix.max(axis=1).mean())
+    model_means = matrix.mean(axis=0).sort_values(ascending=True)
+    best_name = model_means.idxmax()
+    best_mean = float(model_means.max())
+
+    fig_h = max(5.0, len(model_means) * 0.38 + 1.2)
+    fig, ax = plt.subplots(figsize=(8.5, fig_h))
+
+    colors = ["#c44e52" if m == best_name else "#4c72b0" for m in model_means.index]
+    ax.barh(model_means.index.astype(str), model_means.values, color=colors, alpha=0.88)
+
+    metric_part = f" ({metric_display_name})" if metric_display_name else ""
+    ax.axvline(
+        oracle_one,
+        color="#2ca02c",
+        linestyle="--",
+        linewidth=2.0,
+        label=f"Oracle-1{metric_part} ({oracle_one:.4f}) — per-page argmax, mean",
+    )
+    if best_model_legend is not None:
+        blegend = best_model_legend
+    elif stratum_context:
+        blegend = f"Best single model (this stratum): {best_name} ({best_mean:.4f})"
+    elif dataset_scope == "real5":
+        blegend = f"Best Model on Real5: {best_name} ({best_mean:.4f})"
+    elif dataset_scope == "omni":
+        blegend = f"Best model (OmniDocBench digital): {best_name} ({best_mean:.4f})"
+    else:
+        blegend = f"Best fixed model: {best_name} ({best_mean:.4f})"
+    ax.axvline(
+        best_mean,
+        color="#c44e52",
+        linestyle=":",
+        linewidth=1.4,
+        alpha=0.9,
+        label=blegend,
+    )
+
+    lo = min(float(model_means.min()), best_mean, oracle_one)
+    hi = max(float(model_means.max()), best_mean, oracle_one)
+    pad = max(0.015, (hi - lo) * 0.12)
+    ax.set_xlim(max(0.0, lo - pad), min(1.0, hi + pad))
+    if x_axis_label is not None:
+        ax.set_xlabel(x_axis_label)
+    elif metric_display_name:
+        ax.set_xlabel(f"Mean {metric_display_name}")
+    else:
+        ax.set_xlabel("Mean NED")
+    ax.set_ylabel("Model")
+    ax.set_title(title or "Oracle-1 vs mean NED of each fixed model")
+    ax.legend(loc=legend_loc, fontsize=9)
+    plt.tight_layout()
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_oracle_vs_models_per_stratum(
+    df: pd.DataFrame,
+    matrix: pd.DataFrame,
+    stratum_col: str,
+    out_dir: str | Path,
+    *,
+    dataset: str,
+    min_pages: int = 5,
+    legend_loc: str = "upper right",
+    metric_display_name: str | None = None,
+    x_axis_label: str | None = None,
+) -> list[Path]:
+    """One oracle-vs-models PDF per distinct stratum value (doc_type or layout_type).
+
+    Restricts to rows where ``df[\"dataset\"] == dataset`` and ``matrix`` rows match.
+
+    Returns list of written paths (skipped strata omitted).
+    """
+    import re
+
+    out_dir = Path(out_dir)
+    sub_df = df[df["dataset"] == dataset]
+    attrs = sub_df[["page_id", stratum_col]].drop_duplicates("page_id")
+
+    written: list[Path] = []
+    base = out_dir / f"oracle_vs_models_by_{stratum_col}_{dataset}"
+    base.mkdir(parents=True, exist_ok=True)
+
+    for raw_val in sorted(attrs[stratum_col].astype(str).unique()):
+        page_ids = attrs.loc[attrs[stratum_col].astype(str) == raw_val, "page_id"]
+        idx = [p for p in page_ids if p in matrix.index]
+        if len(idx) < min_pages:
+            continue
+        sub_m = matrix.loc[idx]
+        if sub_m.shape[0] < min_pages:
+            continue
+
+        slug = re.sub(r"[^\w\-+.]+", "_", str(raw_val), flags=re.UNICODE).strip("_")
+        slug = slug[:80] if slug else "unknown"
+        out_path = base / f"{slug}.pdf"
+
+        title = (
+            f"{stratum_col.replace('_', ' ').title()}: {raw_val}\n"
+            f"{dataset.upper()} — n_pages={len(idx)}"
+        )
+        plot_oracle_vs_models(
+            sub_m,
+            out_path,
+            title=title,
+            legend_loc=legend_loc,
+            dataset_scope=dataset,
+            stratum_context=True,
+            metric_display_name=metric_display_name,
+            x_axis_label=x_axis_label,
+        )
+        written.append(out_path)
+
+    return written
+
+
 def plot_oracle_barchart(
     oracle_curve: pd.Series,
     best_single_ned: float,
@@ -121,7 +267,8 @@ def plot_oracle_barchart(
     oracle_curve:
         Series indexed by k, values are oracle mean NED.
     best_single_ned:
-        Mean NED of the best static model (horizontal reference line).
+        Mean NED of the best **fixed** model (max over models of column mean NED).
+        Horizontal reference line — not oracle-1 (that is the k=1 bar).
     out_path:
         Output file path.
     """
@@ -222,6 +369,8 @@ def plot_routing_results(
     summaries: list[dict],
     oracle_ned: float,
     out_path: str | Path,
+    *,
+    best_fixed_ned: float | None = None,
 ) -> None:
     """Grouped bar or dot chart comparing all router mean NEDs (Experiments 4 & 5).
 
@@ -231,7 +380,10 @@ def plot_routing_results(
         List of dicts from evaluate.routing_summary(); each has keys
         {label, mean_ned, oracle_gap_pct}.
     oracle_ned:
-        Oracle-1 upper bound for reference line.
+        Oracle-1 upper bound on the **test** matrix (mean row-wise max).
+    best_fixed_ned:
+        Mean NED on the **test** set using the single best fixed parser (max over models
+        of mean page NED). Shown as vertical reference line (“Best Model on Real5”).
     out_path:
         Output file path.
     """
@@ -242,7 +394,9 @@ def plot_routing_results(
     labels   = [s["label"] for s in summaries_sorted]
     neds     = [s["mean_ned"] for s in summaries_sorted]
     gap_pcts = [s.get("oracle_gap_pct", 0.0) for s in summaries_sorted]
-    best_single = min(neds)
+
+    if best_fixed_ned is None:
+        best_fixed_ned = float(np.max(neds))
 
     fig, ax = plt.subplots(figsize=(7, max(3, len(labels) * 0.55 + 1)))
     bars = ax.barh(labels, neds, color="#4c72b0", alpha=0.85)
@@ -253,14 +407,16 @@ def plot_routing_results(
 
     ax.axvline(oracle_ned, color="#2ca02c", linestyle="--", linewidth=1.3,
                label=f"Oracle-1 ({oracle_ned:.3f})")
-    ax.axvline(best_single, color="#c44e52", linestyle=":", linewidth=1.3,
-               label=f"Best single ({best_single:.3f})")
+    ax.axvline(best_fixed_ned, color="#c44e52", linestyle=":", linewidth=1.3,
+               label=f"Best Model on Real5 ({best_fixed_ned:.3f})")
 
-    margin = (oracle_ned - best_single) * 0.5
-    ax.set_xlim(max(0, best_single - margin), min(1.0, oracle_ned + margin * 2))
+    lo = min(min(neds), best_fixed_ned)
+    hi = max(max(neds), oracle_ned, best_fixed_ned)
+    margin = max(0.01, (hi - lo) * 0.35)
+    ax.set_xlim(max(0.0, lo - margin), min(1.0, hi + margin))
     ax.set_xlabel("Mean NED (Real5 test set)")
     ax.set_title("Routing Baseline Comparison")
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=8, loc="upper right")
     plt.tight_layout()
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")

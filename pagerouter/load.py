@@ -29,6 +29,7 @@ def load_predictions(
     omni  = pd.read_csv(omni_path)
     real5 = pd.read_csv(real5_path)
     df = pd.concat([omni, real5], ignore_index=True)
+    df["ned_score"] = pd.to_numeric(df["ned_score"], errors="coerce")
     validate_schema(df)
     return df
 

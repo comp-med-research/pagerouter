@@ -6,9 +6,15 @@ Two diagnostics on OmniDocBench only:
   1. Cluster purity:     k-means clusters, check if best_model is consistent
   2. Neighbor entropy:   for each page, entropy of k nearest neighbors' best_model
 
+Image embeddings (``--backbone``):
+  - ``clip``   — OpenCLIP ViT-B/32 (default)
+  - ``dinov2`` — DINOv2 ViT-B/14 via PyTorch Hub (``facebookresearch/dinov2``)
+  - ``dit``    — Microsoft DiT-base (document image Transformer), sequence mean-pooled
+
 Usage:
   python scripts/run_visual_diagnostics.py
-  python scripts/run_visual_diagnostics.py --rebuild
+  python scripts/run_visual_diagnostics.py --backbone dinov2 --rebuild
+  python scripts/run_visual_diagnostics.py --backbone dit --rebuild
   python scripts/run_visual_diagnostics.py --k-neighbors 10 --k-clusters 5,10,20,50
 """
 
@@ -34,11 +40,22 @@ EMBEDDINGS_DIR = DATA / "embeddings"
 
 N_MODELS = 14  # fixed for max-entropy baseline
 
+BACKBONES = ("clip", "dinov2", "dit")
+
+
+def _output_suffix(backbone: str) -> str:
+    """Keep legacy filenames for the default CLIP run."""
+    return "" if backbone == "clip" else f"_{backbone}"
+
 
 # ─── Embedding ───────────────────────────────────────────────────────────────
 
-class VisualEmbedder:
+
+class ClipEmbedder:
     """CLIP ViT-B/32 image embedder using open-clip-torch."""
+
+    backbone_key = "clip"
+    display_name = "CLIP ViT-B/32"
 
     def __init__(self) -> None:
         try:
@@ -55,9 +72,10 @@ class VisualEmbedder:
             model, _, preprocess = open_clip.create_model_and_transforms(
                 "ViT-B-32", pretrained="openai"
             )
+        self._torch = torch
         self.model = model.to(self.device).eval()
         self.preprocess = preprocess
-        print(f"[embed] CLIP ViT-B/32 loaded on {self.device}")
+        print(f"[embed] {self.display_name} loaded on {self.device}")
 
     def embed_batch(
         self,
@@ -65,9 +83,9 @@ class VisualEmbedder:
         batch_size: int = 32,
     ) -> tuple[np.ndarray, list[int]]:
         """Embed images; returns (embeddings, valid_indices) for paths that loaded."""
-        import torch
         from PIL import Image
 
+        torch = self._torch
         all_embeddings: list[np.ndarray] = []
         valid_indices: list[int] = []
 
@@ -103,22 +121,203 @@ class VisualEmbedder:
         return np.vstack(all_embeddings), valid_indices
 
 
+class Dinov2Embedder:
+    """DINOv2 ViT-B/14 CLS embeddings via ``torch.hub`` (Meta)."""
+
+    backbone_key = "dinov2"
+    display_name = "DINOv2 ViT-B/14"
+
+    def __init__(self, hub_name: str = "dinov2_vitb14") -> None:
+        try:
+            import torch
+            from torchvision import transforms
+        except ImportError as e:
+            sys.exit(
+                f"Missing dependency: {e}\n"
+                "Install with: pip install torch torchvision"
+            )
+
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._torch = torch
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                self.model = torch.hub.load(
+                    "facebookresearch/dinov2",
+                    hub_name,
+                    trust_repo=True,
+                )
+            except TypeError:
+                self.model = torch.hub.load("facebookresearch/dinov2", hub_name)
+        self.model = self.model.to(self.device).eval()
+        self.embed_dim = int(getattr(self.model, "embed_dim", 768))
+        # Standard ImageNet preprocessing (DINOv2 linear-eval protocol; 224×224).
+        self.preprocess = transforms.Compose(
+            [
+                transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+            ]
+        )
+        print(
+            f"[embed] {self.display_name} ({hub_name}, torch.hub) loaded on {self.device}"
+        )
+
+    def _forward_cls(self, batch_tensor):
+        """CLS vector, L2-normalized (handles hub variants)."""
+        torch = self._torch
+        out = self.model.forward_features(batch_tensor)
+        if isinstance(out, dict):
+            feat = out["x_norm_clstoken"]
+        else:
+            feat = out[:, 0] if out.dim() == 3 else out
+        return feat / feat.norm(dim=-1, keepdim=True)
+
+    def embed_batch(
+        self,
+        image_paths: list[Path],
+        batch_size: int = 32,
+    ) -> tuple[np.ndarray, list[int]]:
+        from PIL import Image
+
+        torch = self._torch
+        all_embeddings: list[np.ndarray] = []
+        valid_indices: list[int] = []
+
+        for batch_start in range(0, len(image_paths), batch_size):
+            batch = image_paths[batch_start : batch_start + batch_size]
+            tensors = []
+            local_valid: list[int] = []
+            for local_i, p in enumerate(batch):
+                try:
+                    img = Image.open(p).convert("RGB")
+                    tensors.append(self.preprocess(img))
+                    local_valid.append(batch_start + local_i)
+                except Exception:
+                    pass
+
+            if not tensors:
+                continue
+
+            batch_tensor = torch.stack(tensors).to(self.device)
+            with torch.no_grad():
+                features = self._forward_cls(batch_tensor)
+
+            all_embeddings.append(features.cpu().numpy().astype(np.float32))
+            valid_indices.extend(local_valid)
+
+            n_done = min(batch_start + batch_size, len(image_paths))
+            print(f"\r[embed] {n_done}/{len(image_paths)} images", end="", flush=True)
+
+        print()
+        if not all_embeddings:
+            return np.empty((0, self.embed_dim), dtype=np.float32), []
+        return np.vstack(all_embeddings), valid_indices
+
+
+class DitEmbedder:
+    """Microsoft DiT-base: sequence mean-pool then L2-normalise."""
+
+    backbone_key = "dit"
+    display_name = "DiT-base (microsoft/dit-base)"
+
+    def __init__(self, hf_model: str = "microsoft/dit-base") -> None:
+        try:
+            import torch
+            from transformers import AutoImageProcessor, AutoModel
+        except ImportError as e:
+            sys.exit(
+                f"Missing dependency: {e}\nInstall with: pip install transformers torch"
+            )
+
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._torch = torch
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self.processor = AutoImageProcessor.from_pretrained(hf_model)
+            self.model = AutoModel.from_pretrained(hf_model).to(self.device).eval()
+        self.hidden_size = int(getattr(self.model.config, "hidden_size", 768))
+        print(f"[embed] {self.display_name} loaded on {self.device}")
+
+    def embed_batch(
+        self,
+        image_paths: list[Path],
+        batch_size: int = 8,
+    ) -> tuple[np.ndarray, list[int]]:
+        from PIL import Image
+
+        torch = self._torch
+        all_embeddings: list[np.ndarray] = []
+        valid_indices: list[int] = []
+
+        for batch_start in range(0, len(image_paths), batch_size):
+            batch = image_paths[batch_start : batch_start + batch_size]
+            images = []
+            local_valid: list[int] = []
+            for local_i, p in enumerate(batch):
+                try:
+                    images.append(Image.open(p).convert("RGB"))
+                    local_valid.append(batch_start + local_i)
+                except Exception:
+                    pass
+
+            if not images:
+                continue
+
+            inputs = self.processor(images=images, return_tensors="pt")
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            with torch.no_grad():
+                out = self.model(**inputs)
+                hidden = out.last_hidden_state
+                features = hidden.mean(dim=1)
+                features = features / features.norm(dim=-1, keepdim=True)
+
+            all_embeddings.append(features.cpu().numpy().astype(np.float32))
+            valid_indices.extend(local_valid)
+
+            n_done = min(batch_start + batch_size, len(image_paths))
+            print(f"\r[embed] {n_done}/{len(image_paths)} images", end="", flush=True)
+
+        print()
+        if not all_embeddings:
+            return np.empty((0, self.hidden_size), dtype=np.float32), []
+        return np.vstack(all_embeddings), valid_indices
+
+
+def make_embedder(backbone: str) -> ClipEmbedder | Dinov2Embedder | DitEmbedder:
+    b = backbone.lower().strip()
+    if b == "clip":
+        return ClipEmbedder()
+    if b == "dinov2":
+        return Dinov2Embedder()
+    if b == "dit":
+        return DitEmbedder()
+    sys.exit(f"--backbone must be one of {BACKBONES}, got {backbone!r}")
+
+
 # ─── Cache helpers ────────────────────────────────────────────────────────────
 
-def _cache_paths() -> tuple[Path, Path]:
-    return EMBEDDINGS_DIR / "clip_omni.npy", EMBEDDINGS_DIR / "clip_omni_ids.npy"
+def _cache_paths(backbone: str) -> tuple[Path, Path]:
+    b = backbone.lower().strip()
+    return (
+        EMBEDDINGS_DIR / f"{b}_omni.npy",
+        EMBEDDINGS_DIR / f"{b}_omni_ids.npy",
+    )
 
 
-def load_cached_embeddings() -> tuple[np.ndarray, np.ndarray] | None:
-    emb_path, ids_path = _cache_paths()
+def load_cached_embeddings(backbone: str) -> tuple[np.ndarray, np.ndarray] | None:
+    emb_path, ids_path = _cache_paths(backbone)
     if emb_path.exists() and ids_path.exists():
         return np.load(emb_path), np.load(ids_path, allow_pickle=True)
     return None
 
 
-def save_cached_embeddings(embeddings: np.ndarray, page_ids: np.ndarray) -> None:
+def save_cached_embeddings(
+    backbone: str, embeddings: np.ndarray, page_ids: np.ndarray
+) -> None:
     EMBEDDINGS_DIR.mkdir(parents=True, exist_ok=True)
-    emb_path, ids_path = _cache_paths()
+    emb_path, ids_path = _cache_paths(backbone)
     np.save(emb_path, embeddings)
     np.save(ids_path, page_ids)
     print(f"[embed] Saved {len(embeddings)} embeddings to {emb_path}")
@@ -214,7 +413,9 @@ def run_cluster_purity(
     return pd.DataFrame(rows)
 
 
-def plot_cluster_purity(purity_df: pd.DataFrame, out_path: Path) -> None:
+def plot_cluster_purity(
+    purity_df: pd.DataFrame, out_path: Path, *, embedder_label: str
+) -> None:
     import matplotlib.pyplot as plt
 
     k_values = sorted(purity_df["k"].unique())
@@ -233,7 +434,7 @@ def plot_cluster_purity(purity_df: pd.DataFrame, out_path: Path) -> None:
         ax.set_ylabel("Count")
         ax.legend(fontsize=8)
 
-    fig.suptitle("Cluster purity distribution (CLIP ViT-B/32, OmniDocBench)", y=1.02)
+    fig.suptitle(f"Cluster purity distribution ({embedder_label}, OmniDocBench)", y=1.02)
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
@@ -306,7 +507,13 @@ def run_neighbor_entropy(
     return df
 
 
-def plot_neighbor_entropy(entropy_df: pd.DataFrame, out_dir: Path) -> None:
+def plot_neighbor_entropy(
+    entropy_df: pd.DataFrame,
+    out_dir: Path,
+    *,
+    embedder_label: str,
+    file_suffix: str,
+) -> None:
     import matplotlib.pyplot as plt
 
     # Plot 1 — histogram
@@ -319,10 +526,10 @@ def plot_neighbor_entropy(entropy_df: pd.DataFrame, out_dir: Path) -> None:
                label=f"max={math.log2(N_MODELS):.3f}")
     ax.set_xlabel("Neighbor label entropy (bits)")
     ax.set_ylabel("Count")
-    ax.set_title("Per-page neighbor entropy (CLIP ViT-B/32, OmniDocBench)")
+    ax.set_title(f"Per-page neighbor entropy ({embedder_label}, OmniDocBench)")
     ax.legend()
     fig.tight_layout()
-    p1 = out_dir / "diagnostic_neighbor_entropy_hist.pdf"
+    p1 = out_dir / f"diagnostic_neighbor_entropy_hist{file_suffix}.pdf"
     fig.savefig(p1, bbox_inches="tight")
     plt.close(fig)
     print(f"[diag2] Saved {p1}")
@@ -339,10 +546,10 @@ def plot_neighbor_entropy(entropy_df: pd.DataFrame, out_dir: Path) -> None:
         ax.text(val + 0.02, bar.get_y() + bar.get_height() / 2,
                 f"{val:.2f}", va="center", fontsize=8)
     ax.set_xlabel("Mean neighbor entropy (bits)")
-    ax.set_title("Mean neighbor entropy by doc_type (CLIP ViT-B/32)")
+    ax.set_title(f"Mean neighbor entropy by doc_type ({embedder_label})")
     ax.legend(fontsize=8)
     fig.tight_layout()
-    p2 = out_dir / "diagnostic_neighbor_entropy_by_doctype.pdf"
+    p2 = out_dir / f"diagnostic_neighbor_entropy_by_doctype{file_suffix}.pdf"
     fig.savefig(p2, bbox_inches="tight")
     plt.close(fig)
     print(f"[diag2] Saved {p2}")
@@ -350,7 +557,13 @@ def plot_neighbor_entropy(entropy_df: pd.DataFrame, out_dir: Path) -> None:
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
-def print_summary(purity_df: pd.DataFrame, entropy_df: pd.DataFrame) -> None:
+def print_summary(
+    purity_df: pd.DataFrame,
+    entropy_df: pd.DataFrame,
+    *,
+    backbone: str,
+    embedder_label: str,
+) -> None:
     k10_purity = purity_df[purity_df["k"] == 10]["purity"]
     mean_purity = k10_purity.mean() if len(k10_purity) else float("nan")
     median_purity = k10_purity.median() if len(k10_purity) else float("nan")
@@ -373,6 +586,7 @@ def print_summary(purity_df: pd.DataFrame, entropy_df: pd.DataFrame) -> None:
     print("=" * 52)
     print("  DIAGNOSTIC SUMMARY")
     print("=" * 52)
+    print(f"  Backbone: {backbone} ({embedder_label})")
     print(f"  Cluster purity (k=10):           mean={mean_purity:.3f}, median={median_purity:.3f}")
     print(f"  Neighbor entropy (k=10 neighbors): mean={mean_entropy:.3f}")
     print(f"  Max possible entropy (14 models):  {max_entropy:.3f}")
@@ -400,6 +614,12 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing page image files (default: data/page_images/)",
     )
     ap.add_argument(
+        "--backbone",
+        choices=BACKBONES,
+        default="clip",
+        help="Visual embedding model (default: clip)",
+    )
+    ap.add_argument(
         "--rebuild", action="store_true",
         help="Force recompute embeddings even if cache exists",
     )
@@ -417,6 +637,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     k_values = [int(k.strip()) for k in args.k_clusters.split(",")]
+    backbone = args.backbone.lower().strip()
+    suf = _output_suffix(backbone)
+    embedder = make_embedder(backbone)
 
     FIGURES.mkdir(parents=True, exist_ok=True)
     RESULTS.mkdir(parents=True, exist_ok=True)
@@ -428,10 +651,13 @@ def main() -> None:
     print(f"[data] {len(all_page_ids)} pages, {len(best_model.unique())} models")
 
     # ── Embeddings ───────────────────────────────────────────────────────────
-    cached = None if args.rebuild else load_cached_embeddings()
+    cached = None if args.rebuild else load_cached_embeddings(backbone)
     if cached is not None:
         embeddings, emb_page_ids = cached
-        print(f"[embed] Loaded {len(embeddings)} cached embeddings from {_cache_paths()[0]}")
+        print(
+            f"[embed] Loaded {len(embeddings)} cached embeddings from "
+            f"{_cache_paths(backbone)[0]}"
+        )
     else:
         image_paths, found_ids = resolve_image_paths(all_page_ids, args.image_dir)
         if not image_paths:
@@ -441,37 +667,46 @@ def main() -> None:
                 "and re-run, or point --image-dir to the correct directory."
             )
         print(f"[embed] Found {len(image_paths)}/{len(all_page_ids)} images in {args.image_dir}")
-        embedder = VisualEmbedder()
-        raw_embeddings, valid_indices = embedder.embed_batch(image_paths, batch_size=32)
+        bs = 8 if backbone == "dit" else 32
+        raw_embeddings, valid_indices = embedder.embed_batch(image_paths, batch_size=bs)
         emb_page_ids = np.array([found_ids[i] for i in valid_indices])
         embeddings = raw_embeddings
-        save_cached_embeddings(embeddings, emb_page_ids)
+        save_cached_embeddings(backbone, embeddings, emb_page_ids)
 
     if len(embeddings) == 0:
         sys.exit("No embeddings produced. Check that images are valid.")
 
-    print(f"[embed] Working with {len(embeddings)} embedded pages")
+    print(f"[embed] Backbone={backbone} ({embedder.display_name}); {len(embeddings)} embedded pages")
 
     # ── Diagnostic 1 — Cluster purity ────────────────────────────────────────
     print("\n── Diagnostic 1: Cluster purity ──────────────────────────────────")
     purity_df = run_cluster_purity(embeddings, emb_page_ids, best_model, k_values)
-    purity_csv = RESULTS / "diagnostic_cluster_purity.csv"
+    purity_csv = RESULTS / f"diagnostic_cluster_purity{suf}.csv"
     purity_df.to_csv(purity_csv, index=False)
     print(f"[diag1] Saved {purity_csv}")
-    plot_cluster_purity(purity_df, FIGURES / "diagnostic_cluster_purity.pdf")
+    plot_cluster_purity(
+        purity_df,
+        FIGURES / f"diagnostic_cluster_purity{suf}.pdf",
+        embedder_label=embedder.display_name,
+    )
 
     # ── Diagnostic 2 — Neighbor entropy ──────────────────────────────────────
     print(f"\n── Diagnostic 2: Neighbor entropy (k={args.k_neighbors}) ─────────────────")
     entropy_df = run_neighbor_entropy(
         embeddings, emb_page_ids, best_model, meta, args.k_neighbors
     )
-    entropy_csv = RESULTS / "diagnostic_neighbor_entropy.csv"
+    entropy_csv = RESULTS / f"diagnostic_neighbor_entropy{suf}.csv"
     entropy_df.to_csv(entropy_csv, index=False)
     print(f"[diag2] Saved {entropy_csv}")
-    plot_neighbor_entropy(entropy_df, FIGURES)
+    plot_neighbor_entropy(
+        entropy_df,
+        FIGURES,
+        embedder_label=embedder.display_name,
+        file_suffix=suf,
+    )
 
     # ── Summary ──────────────────────────────────────────────────────────────
-    print_summary(purity_df, entropy_df)
+    print_summary(purity_df, entropy_df, backbone=backbone, embedder_label=embedder.display_name)
 
 
 if __name__ == "__main__":

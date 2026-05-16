@@ -29,21 +29,28 @@ def main() -> None:
     ap.add_argument("--real5", type=Path, default=DATA / "real5_predictions.csv")
     ap.add_argument("--dataset", choices=["omni", "real5", "both"], default="omni")
     ap.add_argument("--out-dir", type=Path, default=FIGURES)
+    ap.add_argument("--figures-dir", type=Path, default=None,
+                    help="Figure output directory (default: project figures/)")
+    ap.add_argument("--results-dir", type=Path, default=None,
+                    help="CSV output directory (default: project results/)")
     args = ap.parse_args()
 
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    RESULTS.mkdir(parents=True, exist_ok=True)
+    figures_dir = args.figures_dir or args.out_dir
+    results_dir = args.results_dir or RESULTS
+
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
 
     df = load.load_predictions(args.omni, args.real5)
     load.validate_schema(df)
 
     for stratum_col in ["doc_type", "layout_type"]:
         matrix = profiles.compute_score_matrix(df, stratum_col)
-        matrix.to_csv(RESULTS / f"profiles_{stratum_col}.csv")
+        matrix.to_csv(results_dir / f"profiles_{stratum_col}.csv")
         viz.plot_capability_heatmap(
             matrix,
             stratum_col=stratum_col,
-            out_path=args.out_dir / f"capability_heatmap_{stratum_col}.pdf",
+            out_path=figures_dir / f"capability_heatmap_{stratum_col}.pdf",
         )
         print(f"Wrote capability_heatmap_{stratum_col}.pdf")
 

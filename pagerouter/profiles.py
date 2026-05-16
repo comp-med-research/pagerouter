@@ -33,7 +33,7 @@ def compute_score_matrix(df: pd.DataFrame, stratum_col: str) -> pd.DataFrame:
     matrix = profiles.pivot(index="model", columns="stratum", values="mean_ned")
     matrix.columns.name = None
     matrix.index.name = "model"
-    return matrix
+    return matrix.astype(float)
 
 
 def rank_models_per_stratum(matrix: pd.DataFrame) -> pd.DataFrame:
