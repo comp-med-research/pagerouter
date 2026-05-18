@@ -141,7 +141,8 @@ class XGBoostRouter(BaseRouter):
 class AgenticRouter(BaseRouter):
     """VLM routing agent that selects a model given only a page image.
 
-    Zero-shot — fit() is a no-op. Calls Anthropic API (claude-sonnet-4-6).
+    Zero-shot — fit() is a no-op. Calls the Anthropic Messages API; ``model_id``
+    must be a vision-capable Claude model (default ``claude-sonnet-4-6``).
     Requires ANTHROPIC_API_KEY environment variable.
     """
 

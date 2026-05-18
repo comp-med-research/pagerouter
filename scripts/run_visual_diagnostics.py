@@ -6,6 +6,9 @@ Two diagnostics on OmniDocBench only:
   1. Cluster purity:     k-means clusters, check if best_model is consistent
   2. Neighbor entropy:   for each page, entropy of k nearest neighbors' best_model
 
+Optional ``--umap``: 2-D plots colored by doc_type vs argmax best model. With neighbor entropy
+in the ~30–60% band, best-model clouds overlap by construction; compare against doc_type geometry.
+
 Image embeddings (``--backbone``):
   - ``clip``   — OpenCLIP ViT-B/32 (default)
   - ``dinov2`` — DINOv2 ViT-B/14 via PyTorch Hub (``facebookresearch/dinov2``)
@@ -16,6 +19,7 @@ Usage:
   python scripts/run_visual_diagnostics.py --backbone dinov2 --rebuild
   python scripts/run_visual_diagnostics.py --backbone dit --rebuild
   python scripts/run_visual_diagnostics.py --k-neighbors 10 --k-clusters 5,10,20,50
+  python scripts/run_visual_diagnostics.py --umap
 """
 
 from __future__ import annotations
@@ -603,6 +607,101 @@ def print_summary(
     print("=" * 52)
 
 
+def run_umap_plots(
+    embeddings: np.ndarray,
+    page_ids: np.ndarray,
+    best_model: pd.Series,
+    meta: pd.DataFrame,
+    out_dir: Path,
+    *,
+    file_suffix: str,
+    embedder_label: str,
+    n_neighbors: int,
+    min_dist: float,
+    random_state: int,
+) -> None:
+    """2-D UMAP for qualitative geometry; compare doc_type vs argmax-best-model coloring."""
+    try:
+        import umap
+    except ImportError:
+        sys.exit(
+            "Missing dependency: umap-learn\n"
+            "Install with: pip install umap-learn"
+        )
+    import matplotlib.pyplot as plt
+    from sklearn.preprocessing import StandardScaler
+
+    pids = np.array([str(p) for p in page_ids])
+    bm = best_model.reindex(pids)
+    doc = meta["doc_type"].reindex(pids)
+    mask = bm.notna()
+    X = embeddings[mask.to_numpy()]
+    bm_ok = bm[mask].astype(str).reset_index(drop=True)
+    doc_ok = doc[mask].fillna("unknown").astype(str).reset_index(drop=True)
+    if len(X) < 30:
+        print("[umap] Skipping UMAP: fewer than 30 embedded pages with labels.")
+        return
+
+    print(
+        f"[umap] Fitting UMAP (n={len(X)}, n_neighbors={n_neighbors}, "
+        f"min_dist={min_dist}) ...",
+        flush=True,
+    )
+    Xs = StandardScaler().fit_transform(X)
+    reducer = umap.UMAP(
+        n_neighbors=min(n_neighbors, len(X) - 1),
+        min_dist=min_dist,
+        metric="euclidean",
+        random_state=random_state,
+        verbose=False,
+    )
+    z = reducer.fit_transform(Xs)
+    print("[umap] Done.")
+
+    def scatter_categories(z_xy: np.ndarray, cats: pd.Series, title: str, fname: str) -> None:
+        fig, ax = plt.subplots(figsize=(11, 8))
+        uniques = sorted(cats.unique())
+        for c in uniques:
+            m = cats.values == c
+            ax.scatter(
+                z_xy[m, 0],
+                z_xy[m, 1],
+                s=12,
+                alpha=0.72,
+                label=c,
+                rasterized=True,
+            )
+        ax.set_title(title)
+        ax.set_xlabel("UMAP-1")
+        ax.set_ylabel("UMAP-2")
+        ax.legend(
+            bbox_to_anchor=(1.02, 1),
+            loc="upper left",
+            fontsize=7,
+            ncol=2,
+            framealpha=0.9,
+        )
+        fig.tight_layout()
+        outp = out_dir / fname
+        outp.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(outp, bbox_inches="tight", dpi=160)
+        plt.close(fig)
+        print(f"[umap] Saved {outp}")
+
+    scatter_categories(
+        z,
+        bm_ok,
+        f"UMAP ({embedder_label}) colored by argmax best model",
+        f"diagnostic_umap_best_model{file_suffix}.pdf",
+    )
+    scatter_categories(
+        z,
+        doc_ok,
+        f"UMAP ({embedder_label}) colored by doc_type",
+        f"diagnostic_umap_doc_type{file_suffix}.pdf",
+    )
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
@@ -630,6 +729,29 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--k-clusters", type=str, default="5,10,20,50",
         help="Comma-separated k values for Diagnostic 1 (default: 5,10,20,50)",
+    )
+    ap.add_argument(
+        "--umap",
+        action="store_true",
+        help="Write 2-D UMAP scatter PDFs (requires umap-learn)",
+    )
+    ap.add_argument(
+        "--umap-neighbors",
+        type=int,
+        default=25,
+        help="UMAP n_neighbors (default: 25)",
+    )
+    ap.add_argument(
+        "--umap-min-dist",
+        type=float,
+        default=0.08,
+        help="UMAP min_dist (default: 0.08)",
+    )
+    ap.add_argument(
+        "--umap-seed",
+        type=int,
+        default=42,
+        help="UMAP random_state (default: 42)",
     )
     return ap.parse_args()
 
@@ -707,6 +829,25 @@ def main() -> None:
 
     # ── Summary ──────────────────────────────────────────────────────────────
     print_summary(purity_df, entropy_df, backbone=backbone, embedder_label=embedder.display_name)
+
+    if args.umap:
+        print("\n── Optional: UMAP embedding plots ──────────────────────────────")
+        print(
+            "[umap] Best-model coloring often looks mixed when neighbor entropy is ~40–60% "
+            "of max; compare with doc_type coloring."
+        )
+        run_umap_plots(
+            embeddings,
+            emb_page_ids,
+            best_model,
+            meta,
+            FIGURES,
+            file_suffix=suf,
+            embedder_label=embedder.display_name,
+            n_neighbors=args.umap_neighbors,
+            min_dist=args.umap_min_dist,
+            random_state=args.umap_seed,
+        )
 
 
 if __name__ == "__main__":

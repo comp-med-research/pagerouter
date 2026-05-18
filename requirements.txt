@@ -23,12 +23,16 @@ google-generativeai>=0.8
 # Image handling (agentic router base64 encoding)
 Pillow>=10.0
 
-# Visual diagnostics / KNN router (Experiment 6)
+# PyTorch / embeddings pipeline (MLP router)
 torch>=2.0
 torchvision>=0.15
+transformers>=4.51
+tqdm>=4.66
+
+# Visual diagnostics / KNN (optional)
 open-clip-torch>=2.24
-transformers>=4.38
 faiss-cpu>=1.7
+umap-learn>=0.5
 
 # Testing
 pytest>=8.0

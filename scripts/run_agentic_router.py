@@ -1,8 +1,11 @@
 """
 Experiment 5 — Agentic router (headline experiment).
 
-A VLM routing agent (claude-sonnet-4-6) receives only a page image and selects
-the best document parsing model. No metadata, no features, no ground truth.
+A VLM routing agent receives only a page image and selects the best document
+parsing model. No metadata, no features, no ground truth.
+
+Uses Anthropic by default (``claude-sonnet-4-6``); set ``--anthropic-model`` to
+another vision-capable model id.
 
 Requires:
   - ANTHROPIC_API_KEY environment variable
@@ -40,6 +43,11 @@ def main() -> None:
     ap.add_argument("--dataset", choices=["omni", "real5"], default="real5",
                     help="Dataset to evaluate on (default: real5 for cross-domain test)")
     ap.add_argument("--prompt", type=Path, default=PROMPTS / "routing_prompt.txt")
+    ap.add_argument(
+        "--anthropic-model",
+        default="claude-sonnet-4-6",
+        help="Anthropic vision-capable model id (default: claude-sonnet-4-6)",
+    )
     ap.add_argument("--log-path", type=Path, default=RESULTS / "agentic_router_responses.jsonl")
     ap.add_argument("--sample-n", type=int, default=None,
                     help="Run on a random sample of N pages (pilot mode)")
@@ -50,6 +58,8 @@ def main() -> None:
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise EnvironmentError("ANTHROPIC_API_KEY is not set.")
+
+    print(f"[agentic] Anthropic model: {args.anthropic_model}")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     RESULTS.mkdir(parents=True, exist_ok=True)
@@ -69,6 +79,7 @@ def main() -> None:
     router = AgenticRouter(
         prompt_path=args.prompt,
         log_path=args.log_path,
+        model_id=args.anthropic_model,
         sample_n=args.sample_n,
     )
     router.fit(test_matrix, test_df)

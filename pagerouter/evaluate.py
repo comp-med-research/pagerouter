@@ -25,6 +25,19 @@ def oracle_gap_recovered(
     return (router_ned - best_single_ned) / gap
 
 
+def best_single_realized_ned(train_matrix: pd.DataFrame, test_matrix: pd.DataFrame) -> tuple[float, str]:
+    """Pick parser with highest *train* (omni) mean NED, report its mean NED on *test* (real5).
+
+    Aligns with 'train on omni, evaluate on real5' baselines.
+    """
+    champion = train_matrix.mean(axis=0).idxmax()
+    # column may be missing on test for some parsers — use float mean with NaNs skipped
+    if champion not in test_matrix.columns:
+        raise ValueError(f"Train champion {champion!r} not in test matrix columns.")
+    ned = float(test_matrix[champion].mean(skipna=True))
+    return ned, str(champion)
+
+
 def per_page_ned(selections: pd.Series, matrix: pd.DataFrame) -> pd.Series:
     """Look up each page's NED score given the model selected for that page."""
     return pd.Series(

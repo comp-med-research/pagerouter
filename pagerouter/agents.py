@@ -20,13 +20,14 @@ MODELS = [
     "monkeyocr_pro_3b", "paddleocrVL_1_5", "rolmocr", "youtu",
 ]
 
+# cost_per_call = rough estimate per routing call (image + short text); tune from your invoices.
 AGENT_REGISTRY: list[dict] = [
-    {"name": "claude",   "provider": "anthropic", "model": "claude-sonnet-4-6",            "cost_per_call": 0.003},
-    {"name": "gpt",      "provider": "openai",    "model": "gpt-5.5",                      "cost_per_call": 0.010},
-    {"name": "gemini",   "provider": "google",    "model": "gemini-2.5-pro",               "cost_per_call": 0.004},
-    {"name": "kimi",     "provider": "moonshot",  "model": "moonshot-v1-8k-vision",        "cost_per_call": 0.001},
-    {"name": "qwen",     "provider": "together",  "model": "Qwen/Qwen2.5-VL-7B-Instruct", "cost_per_call": 0.0005},
-    {"name": "internvl", "provider": "together",  "model": "OpenGVLab/InternVL2-8B",       "cost_per_call": 0.0005},
+    {"name": "claude", "tier": "heavy", "provider": "anthropic", "model": "claude-sonnet-4-6", "cost_per_call": 0.003},
+    {"name": "gpt", "tier": "heavy", "provider": "openai", "model": "gpt-5.5", "cost_per_call": 0.010},
+    {"name": "gemini", "tier": "heavy", "provider": "google", "model": "gemini-2.5-pro", "cost_per_call": 0.004},
+    {"name": "kimi", "tier": "light", "provider": "moonshot", "model": "moonshot-v1-8k-vision", "cost_per_call": 0.001},
+    {"name": "qwen", "tier": "light", "provider": "together", "model": "Qwen/Qwen2.5-VL-7B-Instruct", "cost_per_call": 0.0005},
+    {"name": "internvl", "tier": "light", "provider": "together", "model": "OpenGVLab/InternVL2-8B", "cost_per_call": 0.0005},
 ]
 
 _ENV_KEY: dict[str, str] = {

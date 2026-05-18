@@ -1,21 +1,22 @@
 """
-Multi-agent ablation — tests 6 VLM routing agents on 100 stratified OmniDocBench pages.
+Multi-agent ablation — compares registry VLMs (light + heavy) on a stratified Omni sample.
 
-All agents receive the same informed prompt (image + performance tables).
-Results are streamed to results/ablation_results.jsonl so interrupted runs
-can be resumed — already-processed (page_id, agent_name) pairs are skipped.
+All agents share the same prompt (image + routing instructions). Logs stream to
+``results/ablation_results.jsonl`` (resumable). Summary CSV includes latency p50/p90
+and rough cost estimates so you can pick a router before running it on Real5 or a
+custom CSV (same schema as ``omni_predictions.csv``).
 
-Answers:
-  1. Does routing quality scale with model capability?
-  2. Does any lightweight agent match frontier performance?
-  3. Which agent most often agrees with the oracle?
-  4. Where do agents disagree? (hardest routing decisions)
-  5. Does any agent consistently outperform metadata routing?
+Agent tiers (see ``pagerouter.agents.AGENT_REGISTRY``): ``heavy`` (Claude, GPT, Gemini),
+``light`` (Kimi, Qwen-VL, InternVL on Together). Filter with ``--tier``.
 
 Usage:
-  python scripts/run_agent_ablation.py
-  python scripts/run_agent_ablation.py --agents claude gpt
-  python scripts/run_agent_ablation.py --sample-n 20 --parallel
+  python scripts/run_agent_ablation.py --yes --tier all --sample-n 100
+  python scripts/run_agent_ablation.py --agents qwen internvl claude --parallel --yes
+  python scripts/run_agent_ablation.py --tier light --sample-n 40 --yes
+
+After you pick an agent, evaluate on Real5::
+
+  PYTHONPATH=. python scripts/run_vlm_router_eval.py --agent qwen --dataset real5
 """
 
 from __future__ import annotations
@@ -71,12 +72,12 @@ def stratified_sample(df: pd.DataFrame, n: int, seed: int) -> pd.DataFrame:
 # ─── Cost estimate ────────────────────────────────────────────────────────────
 
 def print_cost_estimate(active_specs: list[dict], n_pages: int) -> None:
-    col_w = [10, 26, 16, 12]
+    col_w = [10, 8, 28, 14, 12]
     header = (
-        f"{'Agent':<{col_w[0]}} {'Model':<{col_w[1]}} "
-        f"{'Est. cost/call':>{col_w[2]}} {'Est. total':>{col_w[3]}}"
+        f"{'Agent':<{col_w[0]}} {'Tier':<{col_w[1]}} {'Model':<{col_w[2]}} "
+        f"{'Est./call':>{col_w[3]}} {'Est. total':>{col_w[4]}}"
     )
-    sep = "-" * sum(col_w + [3 * 2])
+    sep = "-" * (sum(col_w) + 8)
     print()
     print(header)
     print(sep)
@@ -85,12 +86,14 @@ def print_cost_estimate(active_specs: list[dict], n_pages: int) -> None:
         cost_total = spec["cost_per_call"] * n_pages
         total += cost_total
         print(
-            f"{spec['name']:<{col_w[0]}} {spec['model']:<{col_w[1]}} "
-            f"${spec['cost_per_call']:.4f}{'':{col_w[2]-7}} "
-            f"${cost_total:.2f}"
+            f"{spec['name']:<10} {spec['tier']:<8} {spec['model']:<34} "
+            f"${spec['cost_per_call']:<10.4f} ${cost_total:>8.2f}"
         )
     print(sep)
-    print(f"Total estimated cost: ~${total:.2f} for {n_pages} pages × {len(active_specs)} agents")
+    print(
+        f"Total estimated cost: ~${total:.2f} for {n_pages} pages × {len(active_specs)} agents "
+        "(rough; calibrate cost_per_call in agents.py from invoices)"
+    )
     print()
 
 
@@ -211,9 +214,18 @@ def compute_summary(
 
     # Oracle row
     rows.append({
-        "agent": "oracle", "mean_ned": oracle_ned,
-        "oracle_gap_pct": 1.0, "oracle_accuracy": 1.0,
-        "mean_latency_s": float("nan"), "cost": "—",
+        "agent": "oracle",
+        "tier": "—",
+        "provider": "—",
+        "model": "—",
+        "n_calls": len(sampled_ids),
+        "mean_ned": oracle_ned,
+        "oracle_gap_pct": 1.0,
+        "oracle_accuracy": 1.0,
+        "mean_latency_s": float("nan"),
+        "p50_latency_s": float("nan"),
+        "p90_latency_s": float("nan"),
+        "est_cost_usd": float("nan"),
     })
 
     # Agent rows
@@ -224,13 +236,26 @@ def compute_summary(
         mean_ned = float(ag["ned_score"].mean())
         gap = evaluate.oracle_gap_recovered(mean_ned, best_single_ned, oracle_ned)
         oracle_acc = float(ag["is_oracle"].mean())
-        mean_latency = float(ag["latency_s"].mean()) if "latency_s" in ag.columns else float("nan")
+        lat = pd.to_numeric(ag["latency_s"], errors="coerce").dropna()
+        mean_latency = float(lat.mean()) if len(lat) else float("nan")
+        p50_lat = float(lat.quantile(0.5)) if len(lat) else float("nan")
+        p90_lat = float(lat.quantile(0.9)) if len(lat) else float("nan")
         spec = next((s for s in AGENT_REGISTRY if s["name"] == name), None)
-        cost_str = f"${spec['cost_per_call'] * len(ag):.2f}" if spec else "—"
+        n_calls = int(len(ag))
+        est_cost = float(spec["cost_per_call"] * n_calls) if spec else float("nan")
         rows.append({
-            "agent": name, "mean_ned": mean_ned,
-            "oracle_gap_pct": gap, "oracle_accuracy": oracle_acc,
-            "mean_latency_s": mean_latency, "cost": cost_str,
+            "agent": name,
+            "tier": spec["tier"] if spec else "—",
+            "provider": spec["provider"] if spec else "—",
+            "model": spec["model"] if spec else "—",
+            "n_calls": n_calls,
+            "mean_ned": mean_ned,
+            "oracle_gap_pct": gap,
+            "oracle_accuracy": oracle_acc,
+            "mean_latency_s": mean_latency,
+            "p50_latency_s": p50_lat,
+            "p90_latency_s": p90_lat,
+            "est_cost_usd": est_cost,
         })
 
     # Metadata baseline (fitted on full omni, evaluated on sampled pages)
@@ -246,9 +271,18 @@ def compute_summary(
             oracle_ned=oracle_ned, best_single_ned=best_single_ned,
         )
         rows.append({
-            "agent": label, "mean_ned": summary["mean_ned"],
+            "agent": label,
+            "tier": "—",
+            "provider": "—",
+            "model": "—",
+            "n_calls": len(sampled_ids),
+            "mean_ned": summary["mean_ned"],
             "oracle_gap_pct": summary["oracle_gap_pct"],
-            "oracle_accuracy": float("nan"), "mean_latency_s": float("nan"), "cost": "—",
+            "oracle_accuracy": float("nan"),
+            "mean_latency_s": float("nan"),
+            "p50_latency_s": float("nan"),
+            "p90_latency_s": float("nan"),
+            "est_cost_usd": float("nan"),
         })
 
     return pd.DataFrame(rows)
@@ -256,14 +290,23 @@ def compute_summary(
 
 def print_summary_table(summary_df: pd.DataFrame) -> None:
     print()
-    print(f"{'Agent':<12} {'Mean NED':>9} {'% Oracle Gap':>14} {'Oracle Acc':>11} {'Latency (s)':>12} {'Cost':>8}")
-    print("-" * 72)
+    hdr = (
+        f"{'Agent':<12} {'Tier':<7} {'NED':>8} {'Gap%':>8} {'OrclAcc':>9} "
+        f"{'Latμ':>8} {'p50':>8} {'p90':>8} {'$/est':>10}"
+    )
+    print(hdr)
+    print("-" * len(hdr))
     for _, row in summary_df.iterrows():
         gap_str = f"{row['oracle_gap_pct']:.1%}" if not pd.isna(row["oracle_gap_pct"]) else "—"
         acc_str = f"{row['oracle_accuracy']:.1%}" if not pd.isna(row["oracle_accuracy"]) else "—"
-        lat_str = f"{row['mean_latency_s']:.2f}" if not pd.isna(row["mean_latency_s"]) else "—"
+        lat_m = f"{row['mean_latency_s']:.2f}" if not pd.isna(row["mean_latency_s"]) else "—"
+        p50 = f"{row['p50_latency_s']:.2f}" if not pd.isna(row["p50_latency_s"]) else "—"
+        p90 = f"{row['p90_latency_s']:.2f}" if not pd.isna(row["p90_latency_s"]) else "—"
+        cost_str = f"{row['est_cost_usd']:.2f}" if not pd.isna(row["est_cost_usd"]) else "—"
+        tier = str(row.get("tier", "—"))
         print(
-            f"{row['agent']:<12} {row['mean_ned']:>9.4f} {gap_str:>14} {acc_str:>11} {lat_str:>12} {row['cost']:>8}"
+            f"{row['agent']:<12} {tier:<7} {row['mean_ned']:>8.4f} {gap_str:>8} {acc_str:>9} "
+            f"{lat_m:>8} {p50:>8} {p90:>8} {cost_str:>10}"
         )
     print()
 
@@ -282,6 +325,12 @@ def parse_args() -> argparse.Namespace:
         choices=[a["name"] for a in AGENT_REGISTRY],
         default=None,
         help="Agent names to run (default: all with available API keys)",
+    )
+    ap.add_argument(
+        "--tier",
+        choices=("all", "light", "heavy"),
+        default="all",
+        help="Restrict to router tier: light (Kimi, Together VLMs) vs heavy (Claude, GPT, Gemini)",
     )
     ap.add_argument("--sample-n", type=int, default=100)
     ap.add_argument("--seed", type=int, default=42)
@@ -337,8 +386,10 @@ def main() -> None:
         if (requested_names is None or s["name"] in requested_names)
         and bool(import_env(s["provider"]))
     ]
+    if args.tier != "all":
+        active_specs = [s for s in active_specs if s.get("tier") == args.tier]
     if not active_specs:
-        print("No agents available (check API key environment variables). Exiting.")
+        print("No agents available (check API keys and --tier / --agents filters). Exiting.")
         return
 
     # ── Cost estimate + confirmation ─────────────────────────────────────────
