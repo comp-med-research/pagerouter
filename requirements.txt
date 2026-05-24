@@ -27,6 +27,10 @@ Pillow>=10.0
 torch>=2.0
 torchvision>=0.15
 transformers>=4.51
+einops>=0.8
+peft>=0.15
+timm>=1.0
+colpali-engine>=0.3.4
 tqdm>=4.66
 
 # Visual diagnostics / KNN (optional)

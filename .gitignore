@@ -11,3 +11,4 @@ venv/
 *.log
 *.tmp
 *.DS_Store
+*.sh

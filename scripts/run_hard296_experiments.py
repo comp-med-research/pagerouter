@@ -7,7 +7,8 @@ Run pagerouter Experiments 1–4 on the OmniDocBench v1.6 hard (296-page) subset
    and evaluates on the hard slice loaded as ``dataset=real5`` (cross-eval naming only —
    scores are still OmniDocBench-digital on those 296 pages).
 
-Outputs go to ``results/hard296/`` and ``figures/hard296/`` so full-benchmark artifacts are untouched.
+Outputs go under ``results/baselines_no_train/hard296/`` (metrics + baseline figures) and
+``results/routers_tabular/hard296/figures/`` (tabular routing PDF).
 
 Usage:
   cd /path/to/pagerouter
@@ -25,8 +26,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_H = ROOT / "data" / "hard296"
-RESULTS_H = ROOT / "results" / "hard296"
-FIGURES_H = ROOT / "figures" / "hard296"
+BASELINES_H = ROOT / "results" / "baselines_no_train" / "hard296"
+RESULTS_H = BASELINES_H / "metrics"
+FIGURES_H = BASELINES_H / "figures"
+ROUTING_FIGURES_H = ROOT / "results" / "routers_tabular" / "hard296" / "figures"
 
 
 def run(cmd: list[str]) -> None:
@@ -56,6 +59,7 @@ def main() -> None:
     py = sys.executable
     RESULTS_H.mkdir(parents=True, exist_ok=True)
     FIGURES_H.mkdir(parents=True, exist_ok=True)
+    ROUTING_FIGURES_H.mkdir(parents=True, exist_ok=True)
 
     if not args.skip_prepare:
         prep = [
@@ -133,11 +137,15 @@ def main() -> None:
             str(train_omni),
             "--real5",
             str(test_real5),
-            *common,
+            "--figures-dir",
+            str(ROUTING_FIGURES_H),
+            "--test-set-label",
+            "hard296",
         ]
     )
 
-    print(f"\nDone. Figures → {FIGURES_H}\n       Tables → {RESULTS_H}")
+    print(f"\nDone. Baseline figures → {FIGURES_H}\n       Baseline tables → {RESULTS_H}")
+    print(f"       Tabular routing PDF → {ROUTING_FIGURES_H / 'routing_results.pdf'}")
 
 
 if __name__ == "__main__":

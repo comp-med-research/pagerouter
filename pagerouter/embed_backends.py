@@ -30,12 +30,57 @@ from transformers import (
 )
 
 try:
-    from transformers import Gemma3ForConditionalGeneration, Qwen3VLForConditionalGeneration
+    from transformers import (
+        Gemma3ForConditionalGeneration,
+        LayoutLMv3Model,
+        LayoutLMv3Processor,
+        Qwen3VLForConditionalGeneration,
+        Siglip2VisionModel,
+    )
 except ImportError:  # pragma: no cover — optional until transformers version catches up
     Gemma3ForConditionalGeneration = None  # type: ignore[misc, assignment]
+    LayoutLMv3Model = None  # type: ignore[misc, assignment]
+    LayoutLMv3Processor = None  # type: ignore[misc, assignment]
     Qwen3VLForConditionalGeneration = None  # type: ignore[misc, assignment]
+    Siglip2VisionModel = None  # type: ignore[misc, assignment]
 
-EncoderFamily = Literal["dinov2", "clip", "siglip", "dit", "qwen3_vl", "gemma3"]
+EncoderFamily = Literal[
+    "dinov2",
+    "clip",
+    "siglip",
+    "siglip2",
+    "dit",
+    "layoutlmv3",
+    "qwen3_vl",
+    "gemma3",
+    "jina_clip",
+    "jina_embeddings_v4",
+    "colqwen2",
+    "colpali",
+    "nemotron_colembed",
+]
+
+
+def apply_transformers_compat_patches() -> None:
+    """Best-effort shims for Jina remote code on newer ``transformers`` builds."""
+    try:
+        import transformers.models.clip.modeling_clip as clip_mod
+
+        if not hasattr(clip_mod, "clip_loss"):
+
+            def _clip_loss_stub(*args: Any, **kwargs: Any) -> Any:
+                raise NotImplementedError("clip_loss stub — inference-only")
+
+            clip_mod.clip_loss = _clip_loss_stub  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    try:
+        from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+        if "default" not in ROPE_INIT_FUNCTIONS and "linear" in ROPE_INIT_FUNCTIONS:
+            ROPE_INIT_FUNCTIONS["default"] = ROPE_INIT_FUNCTIONS["linear"]
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True)
@@ -56,8 +101,28 @@ ENCODER_REGISTRY: dict[str, EncoderSpec] = {
         "google/siglip-large-patch16-384",
         "siglip",
     ),
+    "siglip2-base-naflex": EncoderSpec(
+        "siglip2-base-naflex",
+        "google/siglip2-base-patch16-naflex",
+        "siglip2",
+    ),
+    "jina-clip-v2": EncoderSpec(
+        "jina-clip-v2",
+        "jinaai/jina-clip-v2",
+        "jina_clip",
+    ),
+    "jina-embeddings-v4": EncoderSpec(
+        "jina-embeddings-v4",
+        "jinaai/jina-embeddings-v4",
+        "jina_embeddings_v4",
+    ),
     "dit-base": EncoderSpec("dit-base", "microsoft/dit-base", "dit"),
     "dit-large": EncoderSpec("dit-large", "microsoft/dit-large", "dit"),
+    "layoutlmv3-base": EncoderSpec(
+        "layoutlmv3-base",
+        "microsoft/layoutlmv3-base",
+        "layoutlmv3",
+    ),
     # VLMs (heavy — use bfloat16 on GPU; smaller checkpoints recommended for ablations)
     "qwen3-vl-8b-instruct": EncoderSpec(
         "qwen3-vl-8b-instruct",
@@ -69,10 +134,36 @@ ENCODER_REGISTRY: dict[str, EncoderSpec] = {
         "google/gemma-3-4b-it",
         "gemma3",
     ),
+    # Document-retrieval VLMs (ColBERT-style multi-vector → mean-pooled for routing MLP)
+    "colqwen2-v1.0": EncoderSpec(
+        "colqwen2-v1.0",
+        "vidore/colqwen2-v1.0",
+        "colqwen2",
+    ),
+    "colpali-v1.3": EncoderSpec(
+        "colpali-v1.3",
+        "vidore/colpali-v1.3",
+        "colpali",
+    ),
+    "nemotron-colembed-vl-8b-v2": EncoderSpec(
+        "nemotron-colembed-vl-8b-v2",
+        "nvidia/nemotron-colembed-vl-8b-v2",
+        "nemotron_colembed",
+    ),
 }
 
 # Excluded from ``--encoder all`` (use ``all_with_vlm`` or name keys explicitly).
-HEAVY_VLM_KEYS: frozenset[str] = frozenset({"qwen3-vl-8b-instruct", "gemma-3-4b-it"})
+HEAVY_VLM_KEYS: frozenset[str] = frozenset(
+    {
+        "qwen3-vl-8b-instruct",
+        "gemma-3-4b-it",
+        "jina-clip-v2",
+        "jina-embeddings-v4",
+        "colqwen2-v1.0",
+        "colpali-v1.3",
+        "nemotron-colembed-vl-8b-v2",
+    }
+)
 
 
 def list_encoder_keys(*, include_heavy_vlm: bool = True) -> list[str]:
@@ -88,6 +179,7 @@ def _vlm_dtype(device: torch.device) -> torch.dtype:
 
 def load_encoder(spec: EncoderSpec, device: torch.device) -> tuple[nn.Module, Any]:
     """Load frozen encoder + processor (``AutoImageProcessor`` or ``AutoProcessor`` for VLMs)."""
+    apply_transformers_compat_patches()
     if spec.family == "qwen3_vl":
         if Qwen3VLForConditionalGeneration is None:
             raise ImportError(
@@ -120,6 +212,64 @@ def load_encoder(spec: EncoderSpec, device: torch.device) -> tuple[nn.Module, An
     elif spec.family == "siglip":
         model = SiglipVisionModel.from_pretrained(spec.hf_model_id)
         processor = AutoImageProcessor.from_pretrained(spec.hf_model_id)
+    elif spec.family == "siglip2":
+        if Siglip2VisionModel is None:
+            raise ImportError("Siglip2VisionModel missing; upgrade transformers (>=4.50).")
+        model = Siglip2VisionModel.from_pretrained(spec.hf_model_id)
+        processor = AutoImageProcessor.from_pretrained(spec.hf_model_id)
+    elif spec.family in ("jina_clip", "jina_embeddings_v4"):
+        dtype = _vlm_dtype(device)
+        model = AutoModel.from_pretrained(
+            spec.hf_model_id,
+            trust_remote_code=True,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,
+        )
+        processor = None
+    elif spec.family == "colqwen2":
+        try:
+            from colpali_engine.models import ColQwen2, ColQwen2Processor
+        except ImportError as e:
+            raise ImportError(
+                "colpali-engine is required for colqwen2-v1.0 "
+                "(pip install 'colpali-engine>=0.3.4')."
+            ) from e
+        dtype = _vlm_dtype(device)
+        model = ColQwen2.from_pretrained(
+            spec.hf_model_id,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,
+        )
+        processor = ColQwen2Processor.from_pretrained(spec.hf_model_id)
+    elif spec.family == "colpali":
+        try:
+            from colpali_engine.models import ColPali, ColPaliProcessor
+        except ImportError as e:
+            raise ImportError(
+                "colpali-engine is required for colpali-v1.3 "
+                "(pip install 'colpali-engine>=0.3.4')."
+            ) from e
+        dtype = _vlm_dtype(device)
+        model = ColPali.from_pretrained(
+            spec.hf_model_id,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,
+        )
+        processor = ColPaliProcessor.from_pretrained(spec.hf_model_id)
+    elif spec.family == "nemotron_colembed":
+        dtype = _vlm_dtype(device)
+        model = AutoModel.from_pretrained(
+            spec.hf_model_id,
+            trust_remote_code=True,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,
+        )
+        processor = None
+    elif spec.family == "layoutlmv3":
+        if LayoutLMv3Model is None or LayoutLMv3Processor is None:
+            raise ImportError("LayoutLMv3Model/Processor missing; upgrade transformers.")
+        model = LayoutLMv3Model.from_pretrained(spec.hf_model_id)
+        processor = LayoutLMv3Processor.from_pretrained(spec.hf_model_id, apply_ocr=False)
     else:
         model = AutoModel.from_pretrained(spec.hf_model_id)
         processor = AutoImageProcessor.from_pretrained(spec.hf_model_id)
@@ -205,6 +355,10 @@ def pooled_embedding(
         if getattr(outputs, "pooler_output", None) is not None:
             return outputs.pooler_output
         return outputs.last_hidden_state[:, 0, :]
+    if family == "siglip2":
+        if getattr(outputs, "pooler_output", None) is not None:
+            return outputs.pooler_output
+        return outputs.last_hidden_state[:, 0, :]
     if family == "dit":
         return outputs.last_hidden_state[:, 0, :]
     raise ValueError(f"pooled_embedding: unsupported family {family!r} (use pooled_vlm_embedding for VLMs)")
@@ -257,6 +411,138 @@ def pooled_vlm_embedding(
         return torch.stack(rows, dim=0)
 
     raise ValueError(f"Unknown VLM family: {spec.family!r}")
+
+
+def _normalize_embedding_batch(raw: Any) -> torch.Tensor:
+    """Coerce ``encode_image`` outputs (tensor, list, or ndarray) to ``(B, D)`` float32 CPU."""
+    if torch.is_tensor(raw):
+        t = raw.detach().float().cpu()
+    elif isinstance(raw, list):
+        rows = []
+        for item in raw:
+            if torch.is_tensor(item):
+                rows.append(item.detach().float().reshape(-1).cpu())
+            else:
+                rows.append(torch.as_tensor(item, dtype=torch.float32).reshape(-1))
+        t = torch.stack(rows, dim=0)
+    else:
+        t = torch.as_tensor(raw, dtype=torch.float32)
+    if t.dim() == 1:
+        t = t.unsqueeze(0)
+    return t
+
+
+@torch.inference_mode()
+def pooled_jina_embedding(
+    model: nn.Module,
+    spec: EncoderSpec,
+    images: list[Image.Image],
+    device: torch.device,
+) -> torch.Tensor:
+    """Vision-only embedding (B, D) for Jina CLIP v2 or Jina Embeddings v4."""
+    rows: list[torch.Tensor] = []
+    if spec.family == "jina_clip":
+        for im in images:
+            raw = model.encode_image([im])
+            rows.append(_normalize_embedding_batch(raw).squeeze(0))
+        return torch.stack(rows, dim=0)
+
+    if spec.family == "jina_embeddings_v4":
+        for im in images:
+            raw = model.encode_image(images=[im], task="retrieval")
+            rows.append(_normalize_embedding_batch(raw).squeeze(0))
+        return torch.stack(rows, dim=0)
+
+    raise ValueError(f"Unknown Jina family: {spec.family!r}")
+
+
+@torch.inference_mode()
+def pooled_siglip2_embedding(
+    model: nn.Module,
+    processor: Any,
+    images: list[Image.Image],
+    device: torch.device,
+) -> torch.Tensor:
+    """SigLIP 2 NaFlex vision vector (B, D) — processor supplies ``spatial_shapes`` etc."""
+    batch = processor(images=images, return_tensors="pt")
+    batch = {k: v.to(device) for k, v in batch.items()}
+    outputs = model(**batch)
+    if getattr(outputs, "pooler_output", None) is not None:
+        return outputs.pooler_output.detach().cpu().float()
+    return outputs.last_hidden_state[:, 0, :].detach().cpu().float()
+
+
+def _pool_colbert_tokens(raw: Any) -> torch.Tensor:
+    """ColBERT / late-interaction token grid → one vector per item (B, D)."""
+    if hasattr(raw, "embeddings"):
+        raw = raw.embeddings
+    if torch.is_tensor(raw):
+        t = raw.detach().float()
+    else:
+        t = torch.as_tensor(raw, dtype=torch.float32)
+    if t.dim() == 3:
+        return t.mean(dim=1)
+    if t.dim() == 2:
+        return t
+    raise ValueError(f"Expected ColBERT tensor dim 2 or 3, got shape {tuple(t.shape)}")
+
+
+@torch.inference_mode()
+def pooled_colbert_doc_embedding(
+    model: nn.Module,
+    spec: EncoderSpec,
+    processor: Any,
+    images: list[Image.Image],
+    device: torch.device,
+) -> torch.Tensor:
+    """Document-page embedding from ColQwen2, ColPali, or Nemotron Colembed."""
+    if spec.family in ("colqwen2", "colpali"):
+        batch = processor.process_images(images).to(device)
+        out = model(**batch)
+        return _pool_colbert_tokens(out).cpu()
+
+    if spec.family == "nemotron_colembed":
+        out = model.forward_images(images, batch_size=len(images))
+        return _pool_colbert_tokens(out).cpu()
+
+    raise ValueError(f"Unknown ColBERT doc family: {spec.family!r}")
+
+
+@torch.inference_mode()
+def pooled_layoutlmv3_embedding(
+    model: nn.Module,
+    processor: Any,
+    images: list[Image.Image],
+    device: torch.device,
+    *,
+    boxes_per_image: list[list[list[int]]] | None = None,
+    words_per_image: list[list[str]] | None = None,
+) -> torch.Tensor:
+    """Layout-from-image vector (B, D) via LayoutLMv3 — no OCR.
+
+    Default: single full-page box. Pass ``boxes_per_image`` + ``words_per_image`` for
+    detector boxes (one token word per box).
+    """
+    rows: list[torch.Tensor] = []
+    for i, im in enumerate(images):
+        if boxes_per_image is not None and words_per_image is not None:
+            boxes = boxes_per_image[i]
+            words = words_per_image[i]
+        else:
+            boxes = [[0, 0, 1000, 1000]]
+            words = ["page"]
+        enc = processor(
+            im,
+            text=words,
+            boxes=boxes,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512,
+        )
+        enc = {k: v.to(device) for k, v in enc.items()}
+        out = model(**enc)
+        rows.append(out.last_hidden_state.float().mean(dim=1).squeeze(0).cpu())
+    return torch.stack(rows, dim=0)
 
 
 def load_page_image(path: str | bytes | Image.Image) -> Image.Image:

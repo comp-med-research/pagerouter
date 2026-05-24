@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from pagerouter.routing import MODELS
+from pagerouter.routing import MODELS, StratumMeanChampionRouter, StratumMode
 
 
 def _nan_argmax_row(row: pd.Series) -> str:
@@ -27,11 +27,12 @@ def per_page_oracle_labels(matrix: pd.DataFrame) -> pd.Series:
     return labels
 
 
-def per_stratum_labels(matrix: pd.DataFrame, df_omni: pd.DataFrame) -> pd.Series:
-    """Stratum = (doc_type, layout_type). Label = parser with highest *mean* NED in that stratum on omni.
-
-    Every page in the same stratum receives the same label.
-    """
+def _mean_champion_labels(
+    matrix: pd.DataFrame,
+    df_omni: pd.DataFrame,
+    group_cols: list[str],
+) -> pd.Series:
+    """Label each page with the parser that has highest mean NED in its train bucket."""
     attrs = (
         df_omni[["page_id", "doc_type", "layout_type"]]
         .drop_duplicates("page_id")
@@ -42,23 +43,44 @@ def per_stratum_labels(matrix: pd.DataFrame, df_omni: pd.DataFrame) -> pd.Series
     attrs = attrs.loc[common]
     attrs.index.name = "page_id"
 
-    stratum_to_model: dict[tuple[str, str], str] = {}
+    bucket_to_model: dict[tuple[str, ...], str] = {}
     df_join = attrs.reset_index()
-    for (doc_t, lay_t), g in df_join.groupby(["doc_type", "layout_type"]):
+    for key_vals, g in df_join.groupby(group_cols, sort=False):
+        if not isinstance(key_vals, tuple):
+            key_vals = (str(key_vals),)
+        else:
+            key_vals = tuple(str(v) for v in key_vals)
         page_ids = g["page_id"].tolist()
         sub = matrix.loc[page_ids]
         mean_per_model = sub.mean(axis=0, skipna=True)
         if mean_per_model.isna().all():
-            raise ValueError(f"Stratum {(doc_t, lay_t)!r} has no valid scores.")
-        stratum_to_model[(doc_t, lay_t)] = str(mean_per_model.idxmax())
+            raise ValueError(f"Bucket {key_vals!r} has no valid scores.")
+        bucket_to_model[key_vals] = str(mean_per_model.idxmax())
 
     labels = []
     for pid in matrix.index:
-        key = (attrs.at[pid, "doc_type"], attrs.at[pid, "layout_type"])
-        labels.append(stratum_to_model[key])
+        key = tuple(str(attrs.at[pid, col]) for col in group_cols)
+        labels.append(bucket_to_model[key])
 
-    out = pd.Series(labels, index=matrix.index, name="label")
-    return out
+    return pd.Series(labels, index=matrix.index, name="label")
+
+
+def per_doc_type_labels(matrix: pd.DataFrame, df_omni: pd.DataFrame) -> pd.Series:
+    """Label = parser with highest mean NED for that doc_type on omni train pages."""
+    return _mean_champion_labels(matrix, df_omni, ["doc_type"])
+
+
+def per_layout_labels(matrix: pd.DataFrame, df_omni: pd.DataFrame) -> pd.Series:
+    """Label = parser with highest mean NED for that layout_type on omni train pages."""
+    return _mean_champion_labels(matrix, df_omni, ["layout_type"])
+
+
+def per_stratum_labels(matrix: pd.DataFrame, df_omni: pd.DataFrame) -> pd.Series:
+    """Stratum = (doc_type, layout_type). Label = parser with highest *mean* NED in that stratum on omni.
+
+    Every page in the same stratum receives the same label.
+    """
+    return _mean_champion_labels(matrix, df_omni, ["doc_type", "layout_type"])
 
 
 def stratum_best_lookup(matrix_omni: pd.DataFrame, df_omni: pd.DataFrame) -> dict[tuple[str, str], str]:
@@ -84,27 +106,35 @@ def stratum_best_lookup(matrix_omni: pd.DataFrame, df_omni: pd.DataFrame) -> dic
     return out
 
 
+def stratum_table_baseline_selections(
+    test_matrix: pd.DataFrame,
+    train_matrix: pd.DataFrame,
+    predictions_df: pd.DataFrame,
+    mode: StratumMode,
+) -> pd.Series:
+    """Apply train mean-NED champions per metadata bucket to each test page."""
+    router = StratumMeanChampionRouter(mode).fit(train_matrix, predictions_df)
+    test_ids = test_matrix.index.astype(str)
+    meta = (
+        predictions_df[["page_id", "doc_type", "layout_type"]]
+        .drop_duplicates("page_id")
+        .assign(page_id=lambda d: d["page_id"].astype(str))
+    )
+    eval_df = meta[meta["page_id"].isin(test_ids)]
+    preds = router.predict(eval_df)
+    common = preds.index.astype(str).intersection(test_ids)
+    return preds.loc[common].rename("model")
+
+
 def per_stratum_baseline_selections(
     test_matrix: pd.DataFrame,
     train_matrix: pd.DataFrame,
     df: pd.DataFrame,
     train_df: pd.DataFrame,
 ) -> pd.Series:
-    """For each real5 page, select omni stratum-best parser; fallback to omni best-single."""
-    lookup = stratum_best_lookup(train_matrix, train_df)
-    fallback = str(train_matrix.mean(axis=0).idxmax())
-    attrs = (
-        df[df["dataset"] == "real5"][["page_id", "doc_type", "layout_type"]]
-        .drop_duplicates("page_id")
-        .set_index("page_id")
-    )
-    preds: dict[str, str] = {}
-    for pid in test_matrix.index.astype(str):
-        if pid not in attrs.index:
-            continue
-        key = (str(attrs.at[pid, "doc_type"]), str(attrs.at[pid, "layout_type"]))
-        preds[pid] = lookup.get(key, fallback)
-    return pd.Series(preds, name="model")
+    """For each test page, select omni (doc_type, layout_type) champion; fallback to omni best-single."""
+    _ = train_df  # kept for backward-compatible call sites
+    return stratum_table_baseline_selections(test_matrix, train_matrix, df, "both")
 
 
 def model_to_index(labels: pd.Series) -> tuple[pd.Series, dict[str, int]]:

@@ -92,6 +92,26 @@ def _json_suffix(kind: MetricKind) -> str:
     raise ValueError(f"unknown metric kind: {kind!r}")
 
 
+def aggregate_cdm_per_page_from_per_sample(per_sample_path: Path) -> dict[str, float]:
+    """Mean CDM per page from ``*_display_formula_per_sample_CDM.json`` (Real5 exports)."""
+    with open(per_sample_path, encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        return {}
+    buckets: dict[str, list[float]] = defaultdict(list)
+    for key, raw_val in payload.items():
+        if "_[" not in str(key):
+            continue
+        page = str(key).rsplit("_[", 1)[0]
+        try:
+            buckets[page].append(float(raw_val))
+        except (TypeError, ValueError):
+            continue
+    if not buckets:
+        return {}
+    return {page: sum(vals) / len(vals) for page, vals in buckets.items()}
+
+
 def aggregate_mean_per_page(rows: list[dict], value_fn: Callable[[dict], float | None]) -> dict[str, float]:
     buckets: dict[str, list[float]] = defaultdict(list)
     for row in rows:
@@ -112,6 +132,7 @@ def build_module_long_df(
     *,
     models: list[str] | None = None,
     eval_suffix: str | None = None,
+    dataset: str = "omni",
 ) -> pd.DataFrame:
     """Rows: page_id × model with ned_score = module metric (for oracle tooling)."""
     lookup = gt_lookup(gt_path)
@@ -125,9 +146,21 @@ def build_module_long_df(
         path = raw_dir / f"{raw_name}_quick_match_{json_suffix}"
         if not path.is_file():
             continue
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        page_scores = aggregate_mean_per_page(data, value_fn)
+
+        page_scores: dict[str, float]
+        if kind == "cdm":
+            per_sample = raw_dir / f"{raw_name}_quick_match_display_formula_per_sample_CDM.json"
+            if per_sample.is_file():
+                page_scores = aggregate_cdm_per_page_from_per_sample(per_sample)
+            else:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                page_scores = aggregate_mean_per_page(data, value_fn)
+        else:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            page_scores = aggregate_mean_per_page(data, value_fn)
+
         for page_id, score in page_scores.items():
             if page_id not in lookup:
                 continue
@@ -139,17 +172,17 @@ def build_module_long_df(
                     "ned_score": score,
                     "doc_type": attr["doc_type"],
                     "layout_type": attr["layout_type"],
-                    "dataset": "omni",
+                    "dataset": dataset,
                 }
             )
 
     return pd.DataFrame(rows)
 
 
-def module_score_matrix(long_df: pd.DataFrame) -> pd.DataFrame:
+def module_score_matrix(long_df: pd.DataFrame, *, dataset: str = "omni") -> pd.DataFrame:
     """page × model matrix; duplicates (page_id, model) averaged."""
     if long_df.empty:
         return pd.DataFrame()
-    sub = long_df[long_df["dataset"] == "omni"]
+    sub = long_df[long_df["dataset"] == dataset]
     dedup = sub.groupby(["page_id", "model"], as_index=False)["ned_score"].mean()
     return dedup.pivot(index="page_id", columns="model", values="ned_score")

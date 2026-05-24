@@ -17,6 +17,7 @@ import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
@@ -56,11 +57,139 @@ class BestSingleRouter(BaseRouter):
 
     def fit(self, matrix: pd.DataFrame, df: pd.DataFrame) -> "BestSingleRouter":
         self.best_model: str = matrix.mean(axis=0).idxmax()
+        self.n_train_pages = len(matrix)
         return self
+
+    def diagnose(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Always uses global train mean champion (100% fallback in stratum sense)."""
+        attrs = _page_attrs(df)
+        return pd.DataFrame(
+            {
+                "page_id": attrs.index,
+                "doc_type": attrs["doc_type"].astype(str).values,
+                "layout_type": attrs["layout_type"].astype(str).values,
+                "stratum_key": "global",
+                "used_fallback": True,
+                "selected_model": self.best_model,
+                "stratum_champion_model": self.best_model,
+                "train_bucket_size": self.n_train_pages,
+            }
+        )
 
     def predict(self, df: pd.DataFrame) -> pd.Series:
         pages = _page_attrs(df).index
         return pd.Series(self.best_model, index=pages, name="model")
+
+
+StratumMode = Literal["doc_type", "layout_type", "both"]
+
+
+class StratumMeanChampionRouter(BaseRouter):
+    """Pick the model with highest mean train NED within a metadata stratum.
+
+    Strata and champions are estimated on the training (e.g. Omni) matrix. At test time,
+    each page uses the champion for its stratum; if that stratum never appeared in train
+    (or metadata is missing), falls back to the overall train mean-NED champion.
+    """
+
+    def __init__(self, mode: StratumMode) -> None:
+        self.mode = mode
+
+    def fit(self, matrix: pd.DataFrame, df: pd.DataFrame) -> "StratumMeanChampionRouter":
+        attrs = _page_attrs(df)
+        common = matrix.index.intersection(attrs.index)
+        mat = matrix.loc[common]
+        attrs = attrs.loc[common]
+        joined = mat.join(attrs, how="inner")
+        model_cols = list(mat.columns)
+
+        self.best_overall: str = joined[model_cols].mean(axis=0).idxmax()
+        self.champions: dict[tuple[str, ...], str] = {}
+        self.train_bucket_sizes: dict[tuple[str, ...], int] = {}
+
+        if self.mode == "doc_type":
+            for dt, g in joined.groupby("doc_type", sort=False):
+                key = (str(dt),)
+                self.champions[key] = g[model_cols].mean(axis=0).idxmax()
+                self.train_bucket_sizes[key] = len(g)
+        elif self.mode == "layout_type":
+            for lt, g in joined.groupby("layout_type", sort=False):
+                key = (str(lt),)
+                self.champions[key] = g[model_cols].mean(axis=0).idxmax()
+                self.train_bucket_sizes[key] = len(g)
+        else:
+            for (doc, lay), g in joined.groupby(["doc_type", "layout_type"], sort=False):
+                key = (str(doc), str(lay))
+                self.champions[key] = g[model_cols].mean(axis=0).idxmax()
+                self.train_bucket_sizes[key] = len(g)
+
+        return self
+
+    def _key_for_row(self, row: pd.Series) -> tuple[str, ...]:
+        if self.mode == "doc_type":
+            return (str(row["doc_type"]),)
+        if self.mode == "layout_type":
+            return (str(row["layout_type"]),)
+        return (str(row["doc_type"]), str(row["layout_type"]))
+
+    @staticmethod
+    def _format_stratum_key(key: tuple[str, ...]) -> str:
+        return "|".join(key)
+
+    def diagnose(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Per test page: stratum key, champion vs fallback, train bucket size."""
+        attrs = _page_attrs(df)
+        rows: list[dict] = []
+        for page_id, row in attrs.iterrows():
+            key = self._key_for_row(row)
+            used_fallback = key not in self.champions
+            champion = self.champions.get(key, self.best_overall)
+            rows.append(
+                {
+                    "page_id": page_id,
+                    "doc_type": str(row["doc_type"]),
+                    "layout_type": str(row["layout_type"]),
+                    "stratum_key": self._format_stratum_key(key),
+                    "used_fallback": used_fallback,
+                    "selected_model": champion if not used_fallback else self.best_overall,
+                    "stratum_champion_model": champion,
+                    "train_bucket_size": self.train_bucket_sizes.get(key, 0),
+                }
+            )
+        return pd.DataFrame(rows)
+
+    def predict(self, df: pd.DataFrame) -> pd.Series:
+        attrs = _page_attrs(df)
+        out: dict[str, str] = {}
+        for page_id, row in attrs.iterrows():
+            key = self._key_for_row(row)
+            out[page_id] = self.champions.get(key, self.best_overall)
+        return pd.Series(out, name="model", dtype=object)
+
+
+def train_stratum_snapshot(router: BaseRouter) -> pd.DataFrame | None:
+    """One row per train stratum with bucket size and champion model (lookup routers only)."""
+    if isinstance(router, StratumMeanChampionRouter):
+        rows = [
+            {
+                "stratum_key": router._format_stratum_key(key),
+                "train_bucket_size": n,
+                "stratum_champion_model": router.champions[key],
+            }
+            for key, n in router.train_bucket_sizes.items()
+        ]
+        return pd.DataFrame(rows).sort_values("stratum_key")
+    if isinstance(router, MetadataRouter):
+        rows = [
+            {
+                "stratum_key": doc,
+                "train_bucket_size": n,
+                "stratum_champion_model": router.doc_type_to_model[doc],
+            }
+            for doc, n in router.train_bucket_sizes.items()
+        ]
+        return pd.DataFrame(rows).sort_values("stratum_key")
+    return None
 
 
 class MetadataRouter(BaseRouter):
@@ -76,7 +205,32 @@ class MetadataRouter(BaseRouter):
             .agg(lambda x: x.value_counts().idxmax())
             .to_dict()
         )
+        self.train_bucket_sizes: dict[str, int] = (
+            merged.groupby("doc_type").size().astype(int).to_dict()
+        )
         return self
+
+    def diagnose(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Per test page: doc_type lookup vs global fallback, train bucket size."""
+        attrs = _page_attrs(df)
+        rows: list[dict] = []
+        for page_id, row in attrs.iterrows():
+            doc = str(row["doc_type"])
+            used_fallback = doc not in self.doc_type_to_model
+            champion = self.doc_type_to_model.get(doc, self.best_model)
+            rows.append(
+                {
+                    "page_id": page_id,
+                    "doc_type": doc,
+                    "layout_type": str(row["layout_type"]),
+                    "stratum_key": doc,
+                    "used_fallback": used_fallback,
+                    "selected_model": champion if not used_fallback else self.best_model,
+                    "stratum_champion_model": champion,
+                    "train_bucket_size": self.train_bucket_sizes.get(doc, 0),
+                }
+            )
+        return pd.DataFrame(rows)
 
     def predict(self, df: pd.DataFrame) -> pd.Series:
         attrs = _page_attrs(df)

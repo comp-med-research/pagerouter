@@ -43,6 +43,8 @@ def main() -> None:
 
     df = load.load_predictions(args.omni, args.real5)
     load.validate_schema(df)
+    if args.dataset != "both":
+        df = df[df["dataset"] == args.dataset].copy()
 
     for stratum_col in ["doc_type", "layout_type"]:
         matrix = profiles.compute_score_matrix(df, stratum_col)

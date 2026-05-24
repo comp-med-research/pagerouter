@@ -10,6 +10,111 @@ from pathlib import Path
 
 import pandas as pd
 
+MLP_LABEL_ORDER = ["per_page", "per_doc_type", "per_layout", "per_stratum"]
+MLP_LABEL_COLORS = {
+    "per_page": "#4c72b0",
+    "per_doc_type": "#55a868",
+    "per_layout": "#8172b3",
+    "per_stratum": "#c44e52",
+}
+MLP_LABEL_PRETTY = {
+    "per_page": "per-page label",
+    "per_doc_type": "per-page-type label",
+    "per_layout": "per-layout label",
+    "per_stratum": "per-stratum label",
+}
+
+
+def _baseline_ned_from_df(baselines: pd.DataFrame, method: str, ned_col: str) -> float | None:
+    sub = baselines[baselines["method"] == method]
+    if sub.empty:
+        return None
+    return float(sub.iloc[0][ned_col])
+
+
+def _active_mlp_label_order(mlp: pd.DataFrame) -> list[str]:
+    present = set(mlp["label_type"].dropna().astype(str))
+    return [lt for lt in MLP_LABEL_ORDER if lt in present]
+
+
+def _draw_mlp_ablation_baselines(
+    ax,
+    baselines: pd.DataFrame,
+    *,
+    ned_col: str,
+    test_set_label: str,
+) -> list[float]:
+    """Reference lines for oracle and train/test lookup baselines."""
+    refs: list[float] = []
+
+    def _ned(method: str) -> float | None:
+        return _baseline_ned_from_df(baselines, method, ned_col)
+
+    oracle_ned = _ned("oracle_upper_bound")
+    best_omni_single = _ned("best_single_train_champion")
+    best_fixed_test = _ned("best_fixed_on_test")
+    doc_type_ned = _ned("best_per_doc_type_table")
+    layout_ned = _ned("best_per_layout_table")
+    stratum_ned = _ned("best_per_stratum_table")
+
+    if oracle_ned is not None:
+        ax.axvline(
+            oracle_ned,
+            color="#2ca02c",
+            linestyle="--",
+            linewidth=1.3,
+            label=f"Oracle-1 ({oracle_ned:.3f})",
+        )
+        refs.append(oracle_ned)
+    if best_fixed_test is not None:
+        ax.axvline(
+            best_fixed_test,
+            color="#9467bd",
+            linestyle="-.",
+            linewidth=1.4,
+            label=f"Best fixed model ({test_set_label}) ({best_fixed_test:.3f})",
+        )
+        refs.append(best_fixed_test)
+    if best_omni_single is not None:
+        ax.axvline(
+            best_omni_single,
+            color="#8c8c8c",
+            linestyle=":",
+            linewidth=1.2,
+            label=f"Best Omni single (train set) ({best_omni_single:.3f})",
+        )
+        refs.append(best_omni_single)
+    if doc_type_ned is not None:
+        ax.axvline(
+            doc_type_ned,
+            color="#55a868",
+            linestyle=(0, (5, 2)),
+            linewidth=1.2,
+            alpha=0.85,
+            label=f"Best Omni mean page type (train set) ({doc_type_ned:.3f})",
+        )
+        refs.append(doc_type_ned)
+    if layout_ned is not None:
+        ax.axvline(
+            layout_ned,
+            color="#8172b3",
+            linestyle=(0, (3, 2, 1, 2)),
+            linewidth=1.2,
+            alpha=0.85,
+            label=f"Best Omni mean layout (train set) ({layout_ned:.3f})",
+        )
+        refs.append(layout_ned)
+    if stratum_ned is not None:
+        ax.axvline(
+            stratum_ned,
+            color="#e6a817",
+            linestyle=(0, (3, 1, 1, 1)),
+            linewidth=1.3,
+            label=f"Best Omni mean doc×layout (train set) ({stratum_ned:.3f})",
+        )
+        refs.append(stratum_ned)
+    return refs
+
 
 def plot_capability_heatmap(
     matrix: pd.DataFrame,
@@ -365,12 +470,319 @@ def plot_coverage_curves(
     plt.close(fig)
 
 
+def plot_mlp_ablation(
+    ablation_df: "pd.DataFrame",
+    out_path: str | Path,
+    *,
+    test_set_label: str = "Real5",
+) -> None:
+    """Grouped horizontal bars: per encoder, per-page vs per-stratum MLP vs reference lines."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    df = ablation_df.copy()
+    ned_col = "mean_ned_real5"
+    std_col = "std_ned_real5"
+    gap_col = "oracle_gap_recovered"
+
+    baselines = df[df["kind"] == "baseline"]
+    mlp = df[df["kind"] == "mlp"].copy()
+    if mlp.empty:
+        raise ValueError("No MLP rows in ablation table.")
+
+    enc_order = sorted(mlp["encoder"].unique(), key=lambda x: str(x))
+    enc_display = [str(e).replace("_omni", "") for e in enc_order]
+    y_label = "Layout encoder"
+    if "feature_mode" in mlp.columns:
+        modes = set(mlp["feature_mode"].dropna().astype(str).str.strip()) - {"", "nan"}
+        if modes == {"image"} or (len(modes) == 1 and "image" in modes):
+            y_label = "Visual encoder"
+        elif modes != {"layout"}:
+            y_label = "Encoder / feature mode"
+    label_order = _active_mlp_label_order(mlp)
+    if not label_order:
+        label_order = ["per_page", "per_stratum"]
+
+    n_enc = len(enc_order)
+    n_labels = len(label_order)
+    group_gap = 1.0 + 0.12 * max(0, n_labels - 2)
+    bar_h = min(0.32, 0.78 / max(n_labels, 1))
+    y_centers = np.arange(n_enc) * group_gap
+
+    fig_h = max(4.0, n_enc * (0.28 * n_labels + 0.55) + 2.2)
+    fig, ax = plt.subplots(figsize=(9.0 if n_labels > 2 else 8.5, fig_h))
+
+    all_neds: list[float] = []
+    for li, lt in enumerate(label_order):
+        offset = (li - (n_labels - 1) / 2.0) * bar_h
+        neds, stds, gaps = [], [], []
+        for enc in enc_order:
+            row = mlp[(mlp["encoder"] == enc) & (mlp["label_type"] == lt)]
+            if row.empty:
+                neds.append(np.nan)
+                stds.append(0.0)
+                gaps.append(0.0)
+            else:
+                r = row.iloc[0]
+                neds.append(float(r[ned_col]))
+                stds.append(float(r[std_col]) if pd.notna(r[std_col]) else 0.0)
+                gaps.append(float(r[gap_col]) if pd.notna(r[gap_col]) else 0.0)
+        y_pos = y_centers + offset
+        bars = ax.barh(
+            y_pos,
+            neds,
+            height=bar_h * 0.92,
+            xerr=stds,
+            color=MLP_LABEL_COLORS.get(lt, "#999999"),
+            alpha=0.9,
+            capsize=3,
+            label=MLP_LABEL_PRETTY.get(lt, lt),
+            error_kw={"elinewidth": 1.0, "capthick": 1.0},
+        )
+        for bar, gp, xerr, ned in zip(bars, gaps, stds, neds):
+            if np.isnan(ned):
+                continue
+            all_neds.append(ned)
+            ax.text(
+                bar.get_width() + max(xerr, 0.0005) + 0.001,
+                bar.get_y() + bar.get_height() / 2,
+                f"{gp:.1%}",
+                va="center",
+                fontsize=7,
+            )
+
+    ax.set_yticks(y_centers)
+    ax.set_yticklabels(enc_display)
+    ax.set_ylabel(y_label)
+
+    ref_vals = _draw_mlp_ablation_baselines(
+        ax, baselines, ned_col=ned_col, test_set_label=test_set_label
+    )
+
+    lo = min(all_neds + ref_vals) if (all_neds or ref_vals) else 0.0
+    hi = max(all_neds + ref_vals) if (all_neds or ref_vals) else 1.0
+    margin = max(0.012, (hi - lo) * 0.28)
+    ax.set_xlim(max(0.0, lo - margin), min(1.0, hi + margin))
+    ax.set_xlabel(f"Mean NED ({test_set_label})")
+    title_kind = "Layout" if y_label == "Layout encoder" else "MLP"
+    ax.set_title(f"{title_kind} router ablation ({test_set_label})")
+    ax.legend(fontsize=7, loc="lower right")
+    plt.tight_layout()
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_mlp_logistic_ablation(
+    ablation_df: "pd.DataFrame",
+    out_path: str | Path,
+    *,
+    test_set_label: str = "Real5",
+) -> None:
+    """Grouped bars: MLP vs logistic logistic regression on the same frozen embeddings."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    df = ablation_df.copy()
+    ned_col = "mean_ned_real5"
+    std_col = "std_ned_real5"
+    gap_col = "oracle_gap_recovered"
+
+    baselines = df[df["kind"] == "baseline"]
+    routers = df[df["kind"].isin(["mlp", "logistic"])].copy()
+    if routers.empty:
+        raise ValueError("No MLP/logistic rows in ablation table.")
+
+    enc_order = sorted(routers["encoder"].unique(), key=lambda x: str(x))
+    enc_display = [str(e).replace("_omni", "") for e in enc_order]
+    series = [
+        ("mlp", "per_page", "#4c72b0", "MLP per-page"),
+        ("mlp", "per_stratum", "#8da0cb", "MLP per-stratum"),
+        ("logistic", "per_page", "#c44e52", "Logistic per-page"),
+        ("logistic", "per_stratum", "#e7969c", "Logistic per-stratum"),
+    ]
+
+    n_enc = len(enc_order)
+    group_gap = 1.15
+    bar_h = 0.18
+    y_centers = np.arange(n_enc) * group_gap
+
+    fig_h = max(4.5, n_enc * 1.35 + 2.0)
+    fig, ax = plt.subplots(figsize=(9.0, fig_h))
+
+    all_neds: list[float] = []
+    for si, (router_kind, lt, color, label) in enumerate(series):
+        offset = (si - 1.5) * bar_h
+        neds, stds, gaps = [], [], []
+        for enc in enc_order:
+            row = routers[
+                (routers["encoder"] == enc)
+                & (routers["kind"] == router_kind)
+                & (routers["label_type"] == lt)
+            ]
+            if row.empty:
+                neds.append(np.nan)
+                stds.append(0.0)
+                gaps.append(0.0)
+            else:
+                r = row.iloc[0]
+                neds.append(float(r[ned_col]))
+                stds.append(float(r[std_col]) if pd.notna(r[std_col]) else 0.0)
+                gaps.append(float(r[gap_col]) if pd.notna(r[gap_col]) else 0.0)
+        y_pos = y_centers + offset
+        bars = ax.barh(
+            y_pos,
+            neds,
+            height=bar_h * 0.92,
+            xerr=stds,
+            color=color,
+            alpha=0.92,
+            capsize=2,
+            label=label,
+            error_kw={"elinewidth": 0.9, "capthick": 0.9},
+        )
+        for bar, gp, xerr, ned in zip(bars, gaps, stds, neds):
+            if np.isnan(ned):
+                continue
+            all_neds.append(ned)
+            ax.text(
+                bar.get_width() + max(xerr, 0.0005) + 0.001,
+                bar.get_y() + bar.get_height() / 2,
+                f"{gp:.1%}",
+                va="center",
+                fontsize=6,
+            )
+
+    ax.set_yticks(y_centers)
+    ax.set_yticklabels(enc_display)
+    ax.set_ylabel("Encoder")
+
+    ref_vals = _draw_mlp_ablation_baselines(
+        ax, baselines, ned_col=ned_col, test_set_label=test_set_label
+    )
+
+    lo = min(all_neds + ref_vals) if (all_neds or ref_vals) else 0.0
+    hi = max(all_neds + ref_vals) if (all_neds or ref_vals) else 1.0
+    margin = max(0.012, (hi - lo) * 0.28)
+    ax.set_xlim(max(0.0, lo - margin), min(1.0, hi + margin))
+    ax.set_xlabel(f"Mean NED ({test_set_label})")
+    ax.set_title(f"MLP vs logistic router ({test_set_label})")
+    ax.legend(fontsize=7, loc="lower right")
+    plt.tight_layout()
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_mlp_multimodal_ablation(
+    ablation_df: "pd.DataFrame",
+    out_path: str | Path,
+    *,
+    test_set_label: str = "Real5",
+) -> None:
+    """Grouped bars by feature modality (image / layout / image+layout / …)."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    from pagerouter.mlp_features import FEATURE_MODE_LABELS
+
+    df = ablation_df.copy()
+    ned_col = "mean_ned_real5"
+    std_col = "std_ned_real5"
+    gap_col = "oracle_gap_recovered"
+
+    baselines = df[df["kind"] == "baseline"]
+    mlp = df[df["kind"] == "mlp"].copy()
+    if mlp.empty:
+        raise ValueError("No MLP rows in ablation table.")
+    if "feature_mode" not in mlp.columns:
+        raise ValueError("Multimodal plot requires feature_mode column.")
+
+    mode_order = ["image", "layout", "image_layout", "layout_metadata", "image_metadata", "all"]
+    modes = [m for m in mode_order if m in set(mlp["feature_mode"].astype(str))]
+    mode_labels = [FEATURE_MODE_LABELS.get(m, m) for m in modes]
+
+    label_order = _active_mlp_label_order(mlp) or ["per_page", "per_stratum"]
+
+    n_modes = len(modes)
+    n_labels = len(label_order)
+    group_gap = 1.0 + 0.12 * max(0, n_labels - 2)
+    bar_h = min(0.32, 0.78 / max(n_labels, 1))
+    y_centers = np.arange(n_modes) * group_gap
+
+    fig_h = max(4.5, n_modes * (0.28 * n_labels + 0.55) + 2.0)
+    fig, ax = plt.subplots(figsize=(9.0 if n_labels > 2 else 8.5, fig_h))
+
+    all_neds: list[float] = []
+    for li, lt in enumerate(label_order):
+        offset = (li - (n_labels - 1) / 2.0) * bar_h
+        neds, stds, gaps = [], [], []
+        for mode in modes:
+            row = mlp[(mlp["feature_mode"] == mode) & (mlp["label_type"] == lt)]
+            if row.empty:
+                neds.append(np.nan)
+                stds.append(0.0)
+                gaps.append(0.0)
+            else:
+                r = row.iloc[0]
+                neds.append(float(r[ned_col]))
+                stds.append(float(r[std_col]) if pd.notna(r[std_col]) else 0.0)
+                gaps.append(float(r[gap_col]) if pd.notna(r[gap_col]) else 0.0)
+        y_pos = y_centers + offset
+        bars = ax.barh(
+            y_pos,
+            neds,
+            height=bar_h * 0.92,
+            xerr=stds,
+            color=MLP_LABEL_COLORS.get(lt, "#999999"),
+            alpha=0.9,
+            capsize=3,
+            label=MLP_LABEL_PRETTY.get(lt, lt),
+            error_kw={"elinewidth": 1.0, "capthick": 1.0},
+        )
+        for bar, gp, xerr, ned in zip(bars, gaps, stds, neds):
+            if np.isnan(ned):
+                continue
+            all_neds.append(ned)
+            ax.text(
+                bar.get_width() + max(xerr, 0.0005) + 0.001,
+                bar.get_y() + bar.get_height() / 2,
+                f"{gp:.1%}",
+                va="center",
+                fontsize=7,
+            )
+
+    ax.set_yticks(y_centers)
+    ax.set_yticklabels(mode_labels)
+    ax.set_ylabel("Input features")
+
+    ref_vals = _draw_mlp_ablation_baselines(
+        ax, baselines, ned_col=ned_col, test_set_label=test_set_label
+    )
+
+    lo = min(all_neds + ref_vals) if (all_neds or ref_vals) else 0.0
+    hi = max(all_neds + ref_vals) if (all_neds or ref_vals) else 1.0
+    margin = max(0.012, (hi - lo) * 0.28)
+    ax.set_xlim(max(0.0, lo - margin), min(1.0, hi + margin))
+    ax.set_xlabel(f"Mean NED ({test_set_label})")
+    ax.set_title(f"Fusion router ablation ({test_set_label})")
+    ax.legend(fontsize=7, loc="lower right")
+    plt.tight_layout()
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_routing_results(
     summaries: list[dict],
     oracle_ned: float,
     out_path: str | Path,
     *,
     best_fixed_ned: float | None = None,
+    test_set_label: str = "Real5",
 ) -> None:
     """Grouped bar or dot chart comparing all router mean NEDs (Experiments 4 & 5).
 
@@ -383,7 +795,10 @@ def plot_routing_results(
         Oracle-1 upper bound on the **test** matrix (mean row-wise max).
     best_fixed_ned:
         Mean NED on the **test** set using the single best fixed parser (max over models
-        of mean page NED). Shown as vertical reference line (“Best Model on Real5”).
+        of mean page NED). Shown as vertical reference line.
+    test_set_label:
+        Short name for the target split (e.g. ``\"Real5\"``, ``\"hard296\"``) used in
+        axis label and best-fixed-model legend.
     out_path:
         Output file path.
     """
@@ -408,15 +823,115 @@ def plot_routing_results(
     ax.axvline(oracle_ned, color="#2ca02c", linestyle="--", linewidth=1.3,
                label=f"Oracle-1 ({oracle_ned:.3f})")
     ax.axvline(best_fixed_ned, color="#c44e52", linestyle=":", linewidth=1.3,
-               label=f"Best Model on Real5 ({best_fixed_ned:.3f})")
+               label=f"Best fixed model ({test_set_label}) ({best_fixed_ned:.3f})")
 
     lo = min(min(neds), best_fixed_ned)
     hi = max(max(neds), oracle_ned, best_fixed_ned)
     margin = max(0.01, (hi - lo) * 0.35)
     ax.set_xlim(max(0.0, lo - margin), min(1.0, hi + margin))
-    ax.set_xlabel("Mean NED (Real5 test set)")
+    ax.set_xlabel(f"Mean NED ({test_set_label})")
     ax.set_title("Routing Baseline Comparison")
     ax.legend(fontsize=8, loc="upper right")
+    plt.tight_layout()
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_mlp_fusion_method_ablation(
+    ablation_df: "pd.DataFrame",
+    out_path: str | Path,
+    *,
+    test_set_label: str = "Real5",
+) -> None:
+    """Grouped bars by fusion rule (norm_concat, GMU, bilinear, …) on image+layout."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    from pagerouter.multimodal_fusion import FUSION_LABELS
+
+    df = ablation_df.copy()
+    ned_col = "mean_ned_real5"
+    std_col = "std_ned_real5"
+    gap_col = "oracle_gap_recovered"
+
+    baselines = df[df["kind"] == "baseline"]
+    mlp = df[df["kind"] == "mlp"].copy()
+    if mlp.empty:
+        raise ValueError("No MLP rows in ablation table.")
+    if "feature_fusion" not in mlp.columns:
+        raise ValueError("Fusion-method plot requires feature_fusion column.")
+
+    fusion_order = ["norm_concat", "weighted_avg", "gmu", "bilinear", "concat"]
+    fusions = [f for f in fusion_order if f in set(mlp["feature_fusion"].astype(str))]
+    fusion_labels = [FUSION_LABELS.get(f, f) for f in fusions]
+
+    label_order = _active_mlp_label_order(mlp) or ["per_page", "per_stratum"]
+
+    n_fusions = len(fusions)
+    n_labels = len(label_order)
+    group_gap = 1.0 + 0.12 * max(0, n_labels - 2)
+    bar_h = min(0.32, 0.78 / max(n_labels, 1))
+    y_centers = np.arange(n_fusions) * group_gap
+
+    fig_h = max(4.5, n_fusions * (0.28 * n_labels + 0.55) + 2.0)
+    fig, ax = plt.subplots(figsize=(9.0 if n_labels > 2 else 8.5, fig_h))
+
+    all_neds: list[float] = []
+    for li, lt in enumerate(label_order):
+        offset = (li - (n_labels - 1) / 2.0) * bar_h
+        neds, stds, gaps = [], [], []
+        for fusion in fusions:
+            row = mlp[(mlp["feature_fusion"] == fusion) & (mlp["label_type"] == lt)]
+            if row.empty:
+                neds.append(np.nan)
+                stds.append(0.0)
+                gaps.append(0.0)
+            else:
+                r = row.iloc[0]
+                neds.append(float(r[ned_col]))
+                stds.append(float(r[std_col]) if pd.notna(r[std_col]) else 0.0)
+                gaps.append(float(r[gap_col]) if pd.notna(r[gap_col]) else 0.0)
+        y_pos = y_centers + offset
+        bars = ax.barh(
+            y_pos,
+            neds,
+            height=bar_h * 0.92,
+            xerr=stds,
+            color=MLP_LABEL_COLORS.get(lt, "#999999"),
+            alpha=0.9,
+            capsize=3,
+            label=MLP_LABEL_PRETTY.get(lt, lt),
+            error_kw={"elinewidth": 1.0, "capthick": 1.0},
+        )
+        for bar, gp, xerr, ned in zip(bars, gaps, stds, neds):
+            if np.isnan(ned):
+                continue
+            all_neds.append(ned)
+            ax.text(
+                bar.get_width() + max(xerr, 0.0005) + 0.001,
+                bar.get_y() + bar.get_height() / 2,
+                f"{gp:.1%}",
+                va="center",
+                fontsize=7,
+            )
+
+    ax.set_yticks(y_centers)
+    ax.set_yticklabels(fusion_labels)
+    ax.set_ylabel("Fusion method")
+
+    ref_vals = _draw_mlp_ablation_baselines(
+        ax, baselines, ned_col=ned_col, test_set_label=test_set_label
+    )
+
+    lo = min(all_neds + ref_vals) if (all_neds or ref_vals) else 0.0
+    hi = max(all_neds + ref_vals) if (all_neds or ref_vals) else 1.0
+    margin = max(0.012, (hi - lo) * 0.28)
+    ax.set_xlim(max(0.0, lo - margin), min(1.0, hi + margin))
+    ax.set_xlabel(f"Mean NED ({test_set_label})")
+    ax.set_title(f"Image+layout fusion method ablation ({test_set_label})")
+    ax.legend(fontsize=7, loc="lower right")
     plt.tight_layout()
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")

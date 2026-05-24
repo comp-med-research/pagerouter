@@ -8,8 +8,8 @@ oracle-vs-models plots with metric-appropriate axis labels.
 
 Outputs (per metric) under ``--figures-dir/<metric>/``::
 
-  - oracle_vs_models_omni.pdf
-  - oracle_vs_models_by_{doc_type,layout_type}_omni/*.pdf
+  - oracle_vs_models_{omni|real5}.pdf
+  - oracle_vs_models_by_{doc_type,layout_type}_{omni|real5}/*.pdf
 
 Usage::
 
@@ -34,20 +34,18 @@ from pagerouter.omnidoc_module_scores import MetricKind, build_module_long_df, m
 ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_RAW = ROOT.parent / "rankshift" / "results" / "omnidocbench_eval" / "omnidoc_e2e_quick_match" / "raw"
+DEFAULT_RAW_REAL5 = ROOT.parent / "rankshift" / "results" / "omnidocbench_eval" / "real5_e2e_quick_match" / "raw"
 DEFAULT_GT = ROOT.parent / "rankshift" / "data" / "omnidocbench" / "OmniDocBench.json"
 
 METRIC_META: dict[str, dict[str, str]] = {
     "cdm": {
         "display": "CDM",
-        "title": "Oracle-1 vs fixed models (OmniDocBench) — CDM",
     },
     "teds": {
         "display": "TEDS",
-        "title": "Oracle-1 vs fixed models (OmniDocBench) — TEDS",
     },
     "reading_order": {
         "display": "reading-order accuracy",
-        "title": "Oracle-1 vs fixed models (OmniDocBench) — reading order",
     },
 }
 
@@ -62,9 +60,12 @@ def run_one(
     min_pages_stratum: int,
     skip_stratum: bool,
     eval_suffix: str | None,
+    dataset: str,
 ) -> None:
     meta = METRIC_META[kind]
-    long_df = build_module_long_df(raw_dir, gt_path, kind, eval_suffix=eval_suffix)
+    long_df = build_module_long_df(
+        raw_dir, gt_path, kind, eval_suffix=eval_suffix, dataset=dataset
+    )
     if long_df.empty:
         raise SystemExit(f"No rows built for metric={kind!r} (check raw_dir and gt json).")
 
@@ -74,7 +75,7 @@ def run_one(
     long_df["ned_score"] = long_df["ned_score"].clip(lower=0.0, upper=1.0)
     load.validate_schema(long_df)
 
-    matrix = module_score_matrix(long_df)
+    matrix = module_score_matrix(long_df, dataset=dataset)
     oracle_one = float(matrix.max(axis=1).mean())
     model_means = matrix.mean(axis=0).sort_values(ascending=False)
     best_fixed_mean = float(model_means.max())
@@ -85,18 +86,19 @@ def run_one(
     out_fig.mkdir(parents=True, exist_ok=True)
     out_res.mkdir(parents=True, exist_ok=True)
 
-    model_means.rename("mean_score").to_csv(out_res / f"model_mean_{kind}_omni.csv")
+    model_means.rename("mean_score").to_csv(out_res / f"model_mean_{kind}_{dataset}.csv")
     print(f"[{kind}] Oracle-1 (mean per-page max): {oracle_one:.4f}")
     print(f"[{kind}] Best fixed model mean:       {best_fixed_mean:.4f} ({best_name})")
 
-    x_title = meta["title"]
+    scope = "OmniDocBench (digital)" if dataset == "omni" else "Real5 (scan)"
     disp = meta["display"]
+    x_title = f"Oracle-1 vs fixed models ({scope}) — {disp}"
 
     viz.plot_oracle_vs_models(
         matrix,
-        out_path=out_fig / "oracle_vs_models_omni.pdf",
+        out_path=out_fig / f"oracle_vs_models_{dataset}.pdf",
         title=x_title,
-        dataset_scope="omni",
+        dataset_scope=dataset,
         metric_display_name=disp,
     )
 
@@ -108,14 +110,14 @@ def run_one(
                 matrix,
                 stratum_col=col,
                 out_dir=out_fig,
-                dataset="omni",
+                dataset=dataset,
                 min_pages=min_pages_stratum,
                 metric_display_name=disp,
             )
             n_written += len(paths)
             print(
                 f"[{kind}] Stratum plots ({col}): {len(paths)} PDFs → "
-                f"{out_fig / f'oracle_vs_models_by_{col}_omni'}"
+                f"{out_fig / f'oracle_vs_models_by_{col}_{dataset}'}"
             )
         print(f"[{kind}] Total stratum PDFs: {n_written}")
 
@@ -128,7 +130,13 @@ def main() -> None:
         help="OmniDocBench save suffix embedded in filenames (e.g. hard296 for "
              "{model}_hard296_quick_match_*.json). Required when raw dir mixes full-bench and subset runs.",
     )
-    ap.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW)
+    ap.add_argument(
+        "--dataset",
+        choices=["omni", "real5"],
+        default="omni",
+        help="Which dataset label / eval regime (default: omni)",
+    )
+    ap.add_argument("--raw-dir", type=Path, default=None)
     ap.add_argument("--gt-json", type=Path, default=DEFAULT_GT)
     ap.add_argument(
         "--metrics",
@@ -142,6 +150,9 @@ def main() -> None:
     ap.add_argument("--min-pages-stratum", type=int, default=5)
     ap.add_argument("--skip-stratum-oracle-plots", action="store_true")
     args = ap.parse_args()
+
+    if not args.raw_dir:
+        args.raw_dir = DEFAULT_RAW_REAL5 if args.dataset == "real5" else DEFAULT_RAW
 
     if not args.raw_dir.is_dir():
         raise SystemExit(f"Raw dir not found: {args.raw_dir}")
@@ -158,6 +169,7 @@ def main() -> None:
             min_pages_stratum=args.min_pages_stratum,
             skip_stratum=args.skip_stratum_oracle_plots,
             eval_suffix=args.eval_suffix,
+            dataset=args.dataset,
         )
 
 

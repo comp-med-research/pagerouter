@@ -32,6 +32,10 @@ from pagerouter.embed_backends import (  # noqa: E402
     load_encoder,
     load_page_image,
     pooled_embedding,
+    pooled_jina_embedding,
+    pooled_colbert_doc_embedding,
+    pooled_layoutlmv3_embedding,
+    pooled_siglip2_embedding,
     pooled_vlm_embedding,
 )
 from pagerouter.load import DATA_DIR, DEFAULT_OMNI, DEFAULT_REAL5, load_predictions  # noqa: E402
@@ -62,6 +66,14 @@ def run_one_encoder(
             images.append(load_page_image(img_path))
         if spec.family in ("qwen3_vl", "gemma3"):
             vec = pooled_vlm_embedding(model, spec, processor, images, device).detach().cpu().float()
+        elif spec.family in ("jina_clip", "jina_embeddings_v4"):
+            vec = pooled_jina_embedding(model, spec, images, device).detach().cpu().float()
+        elif spec.family in ("colqwen2", "colpali", "nemotron_colembed"):
+            vec = pooled_colbert_doc_embedding(model, spec, processor, images, device).detach().cpu().float()
+        elif spec.family == "layoutlmv3":
+            vec = pooled_layoutlmv3_embedding(model, processor, images, device)
+        elif spec.family == "siglip2":
+            vec = pooled_siglip2_embedding(model, processor, images, device)
         else:
             pix = processor(images=images, return_tensors="pt")["pixel_values"].to(device)
             vec = pooled_embedding(model, spec.family, pix).detach().cpu()
@@ -91,6 +103,24 @@ def main() -> None:
     ap.add_argument("--real5", type=Path, default=DEFAULT_REAL5)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument(
+        "--layout-batch-size",
+        type=int,
+        default=4,
+        help="Batch size for LayoutLMv3 (lower memory than patch encoders)",
+    )
+    ap.add_argument(
+        "--heavy-batch-size",
+        type=int,
+        default=1,
+        help="Batch size for heavy VLMs / Jina encoders (one image at a time recommended)",
+    )
+    ap.add_argument(
+        "--siglip2-batch-size",
+        type=int,
+        default=4,
+        help="Batch size for SigLIP 2 NaFlex",
+    )
+    ap.add_argument(
         "--image-root",
         type=Path,
         default=DATA_DIR / "page_images",
@@ -117,7 +147,20 @@ def main() -> None:
             )
         out_path = args.out_dir / f"{k}.pt"
         print(f"Writing {out_path} ({len(page_ids)} pages, device={device})")
-        run_one_encoder(k, page_ids, out_path, args.batch_size, device, args.image_root)
+        bs = args.layout_batch_size if ENCODER_REGISTRY[k].family == "layoutlmv3" else args.batch_size
+        if ENCODER_REGISTRY[k].family in (
+            "jina_clip",
+            "jina_embeddings_v4",
+            "qwen3_vl",
+            "gemma3",
+            "colqwen2",
+            "colpali",
+            "nemotron_colembed",
+        ):
+            bs = min(bs, args.heavy_batch_size)
+        if ENCODER_REGISTRY[k].family == "siglip2":
+            bs = min(bs, args.siglip2_batch_size)
+        run_one_encoder(k, page_ids, out_path, bs, device, args.image_root)
     print("Done.")
 
 

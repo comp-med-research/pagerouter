@@ -70,3 +70,87 @@ def routing_summary(
         "oracle_gap_pct": oracle_gap_recovered(router_ned, best_single_ned, oracle_ned),
         "n_pages": len(scores),
     }
+
+
+def summarize_routing_fallback(
+    page_diag: pd.DataFrame,
+    router: str,
+    *,
+    n_train_strata: int | None = None,
+) -> dict:
+    """Aggregate per-page stratum diagnostic into one router-level row."""
+    n = len(page_diag)
+    n_fallback = int(page_diag["used_fallback"].sum())
+    n_champion = n - n_fallback
+    if n_train_strata is None:
+        seen = page_diag.drop_duplicates("stratum_key")
+        n_train_strata = int((seen["train_bucket_size"] > 0).sum())
+    return {
+        "router": router,
+        "n_test_pages": n,
+        "n_stratum_champion": n_champion,
+        "n_fallback": n_fallback,
+        "frac_stratum_champion": n_champion / n if n else 0.0,
+        "frac_fallback": n_fallback / n if n else 0.0,
+        "n_train_strata": n_train_strata,
+    }
+
+
+def summarize_routing_fallback_by_stratum(
+    page_diag: pd.DataFrame,
+    router: str,
+    train_tbl: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Per stratum: train bucket size and test-page champion vs fallback counts."""
+    test_agg = (
+        page_diag.groupby("stratum_key", sort=True)
+        .agg(
+            n_test_pages=("page_id", "count"),
+            n_test_fallback=("used_fallback", "sum"),
+        )
+        .reset_index()
+    )
+    test_agg["n_test_stratum_champion"] = test_agg["n_test_pages"] - test_agg["n_test_fallback"]
+    test_agg["frac_test_stratum_champion"] = (
+        test_agg["n_test_stratum_champion"] / test_agg["n_test_pages"]
+    )
+
+    if train_tbl is not None and not train_tbl.empty:
+        out = train_tbl.merge(test_agg, on="stratum_key", how="outer")
+        out["router"] = router
+        out["train_bucket_size"] = out["train_bucket_size"].fillna(0).astype(int)
+        out["n_test_pages"] = out["n_test_pages"].fillna(0).astype(int)
+        out["n_test_fallback"] = out["n_test_fallback"].fillna(0).astype(int)
+        out["n_test_stratum_champion"] = out["n_test_stratum_champion"].fillna(0).astype(int)
+        out["frac_test_stratum_champion"] = out["frac_test_stratum_champion"].fillna(0.0)
+        cols = [
+            "router",
+            "stratum_key",
+            "train_bucket_size",
+            "stratum_champion_model",
+            "n_test_pages",
+            "n_test_stratum_champion",
+            "n_test_fallback",
+            "frac_test_stratum_champion",
+        ]
+        return out[cols].sort_values(["train_bucket_size", "stratum_key"], ascending=[False, True])
+
+    test_agg["router"] = router
+    test_agg["train_bucket_size"] = page_diag.groupby("stratum_key")["train_bucket_size"].max().reindex(
+        test_agg["stratum_key"]
+    ).values
+    test_agg["stratum_champion_model"] = page_diag.groupby("stratum_key")["stratum_champion_model"].first().reindex(
+        test_agg["stratum_key"]
+    ).values
+    return test_agg[
+        [
+            "router",
+            "stratum_key",
+            "train_bucket_size",
+            "stratum_champion_model",
+            "n_test_pages",
+            "n_test_stratum_champion",
+            "n_test_fallback",
+            "frac_test_stratum_champion",
+        ]
+    ]
