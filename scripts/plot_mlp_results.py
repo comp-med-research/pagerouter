@@ -48,6 +48,16 @@ def _is_multimodal_ablation(df: pd.DataFrame) -> bool:
     return len(primary) > 1
 
 
+def _is_validation_shortlist_ablation(df: pd.DataFrame) -> bool:
+    if "kind" not in df.columns or "feature_mode" not in df.columns:
+        return False
+    mlp = df[df["kind"] == "mlp"]
+    if mlp.empty:
+        return False
+    visual = mlp[mlp["feature_mode"] == "image"]
+    return len(visual) > 1
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--ablation-csv", type=Path, required=True)
@@ -64,6 +74,11 @@ def main() -> None:
         action="store_true",
         help="Use feature_fusion grouping (image+layout fusion ablation plot)",
     )
+    ap.add_argument(
+        "--validation-shortlist",
+        action="store_true",
+        help="Three-panel validation shortlist plot (visual / layout / combo)",
+    )
     args = ap.parse_args()
 
     if not args.ablation_csv.is_file():
@@ -77,7 +92,9 @@ def main() -> None:
     if args.fusion_method and out_name == "mlp_ablation.pdf":
         out_name = "mlp_fusion_method_ablation.pdf"
     out_path = args.figures_dir / out_name
-    if args.fusion_method or _is_fusion_method_ablation(df):
+    if args.validation_shortlist or _is_validation_shortlist_ablation(df):
+        viz.plot_mlp_validation_shortlist(df, out_path, test_set_label=args.test_set_label)
+    elif args.fusion_method or _is_fusion_method_ablation(df):
         viz.plot_mlp_fusion_method_ablation(df, out_path, test_set_label=args.test_set_label)
     elif args.multimodal or _is_multimodal_ablation(df):
         viz.plot_mlp_multimodal_ablation(df, out_path, test_set_label=args.test_set_label)

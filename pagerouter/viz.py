@@ -776,6 +776,212 @@ def plot_mlp_multimodal_ablation(
     plt.close(fig)
 
 
+def _short_encoder(name: str) -> str:
+    s = str(name)
+    for old, new in (
+        ("doclayout-yolo-stats", "yolo"),
+        ("docling-heron-101-stats", "heron"),
+        ("layoutlmv3-detected", "layoutlmv3"),
+        ("colqwen2-v1.0", "colqwen"),
+        ("jina-clip-v2", "jina-clip"),
+        ("dinov2-small", "dinov2-s"),
+        ("clip-l-14", "clip"),
+        ("dit-large", "dit-l"),
+    ):
+        s = s.replace(old, new)
+    return s
+
+
+def _validation_combo_bar_label(row: pd.Series) -> str:
+    enc = str(row["encoder"])
+    mode = str(row.get("feature_mode", ""))
+    if "+metadata" in enc or mode == "all":
+        suffix = "+meta"
+    else:
+        suffix = ""
+    parts = enc.replace("+metadata", "").split("+")
+    if len(parts) >= 2:
+        return f"{_short_encoder(parts[0])}+{_short_encoder(parts[1])}{suffix}"
+    return _short_encoder(enc)
+
+
+def plot_mlp_validation_shortlist(
+    ablation_df: "pd.DataFrame",
+    out_path: str | Path,
+    *,
+    test_set_label: str = "Real5",
+) -> None:
+    """Three-panel plot for validation shortlist (visual / layout / combo grids).
+
+    Unlike ``plot_mlp_multimodal_ablation``, which assumes one config per
+    (feature_mode, label_type), this shows every shortlist configuration.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    df = ablation_df.copy()
+    ned_col = "mean_ned_real5"
+    std_col = "std_ned_real5"
+    gap_col = "oracle_gap_recovered"
+
+    baselines = df[df["kind"] == "baseline"]
+    mlp = df[df["kind"] == "mlp"].copy()
+    if mlp.empty:
+        raise ValueError("No MLP rows in ablation table.")
+
+    visual = mlp[mlp["feature_mode"] == "image"].copy()
+    layout = mlp[mlp["feature_mode"] == "layout"].copy()
+    combo = mlp[mlp["feature_mode"].isin(["image_layout", "all"])].copy()
+
+    fig, axes = plt.subplots(
+        1,
+        3,
+        figsize=(16.0, max(5.0, 0.38 * max(len(visual), len(layout), len(combo) // 2) + 3)),
+        gridspec_kw={"width_ratios": [1.0, 1.0, 2.4]},
+    )
+    if not isinstance(axes, np.ndarray):
+        axes = np.array([axes])
+
+    def _panel(
+        ax,
+        panel_df: pd.DataFrame,
+        y_labels: list[str],
+        *,
+        title: str,
+        color_by_label: bool = True,
+        bar_colors: list[str] | None = None,
+    ) -> list[float]:
+        panel_df = panel_df.copy()
+        panel_df["_y"] = pd.Categorical(
+            panel_df["_plot_y"].astype(str),
+            categories=y_labels,
+            ordered=True,
+        )
+        panel_df = panel_df.sort_values("_y")
+        n = len(y_labels)
+        y_pos = np.arange(n)
+        neds, stds, gaps, colors = [], [], [], []
+        for i, yl in enumerate(y_labels):
+            row = panel_df[panel_df["_plot_y"].astype(str) == yl]
+            if row.empty:
+                neds.append(np.nan)
+                stds.append(0.0)
+                gaps.append(0.0)
+                colors.append("#cccccc")
+            else:
+                r = row.iloc[0]
+                neds.append(float(r[ned_col]))
+                stds.append(float(r[std_col]) if pd.notna(r[std_col]) else 0.0)
+                gaps.append(float(r[gap_col]) if pd.notna(r[gap_col]) else 0.0)
+                if bar_colors is not None:
+                    colors.append(bar_colors[i % len(bar_colors)])
+                elif color_by_label:
+                    colors.append(MLP_LABEL_COLORS.get(str(r["label_type"]), "#999999"))
+                else:
+                    colors.append("#4c72b0")
+
+        bars = ax.barh(
+            y_pos,
+            neds,
+            height=0.72,
+            xerr=stds,
+            color=colors,
+            alpha=0.92,
+            capsize=2,
+            error_kw={"elinewidth": 0.9, "capthick": 0.9},
+        )
+        all_neds: list[float] = []
+        for bar, gp, xerr, ned in zip(bars, gaps, stds, neds):
+            if np.isnan(ned):
+                continue
+            all_neds.append(ned)
+            ax.text(
+                bar.get_width() + max(xerr, 0.0005) + 0.0015,
+                bar.get_y() + bar.get_height() / 2,
+                f"{ned:.3f} ({gp:.0%})",
+                va="center",
+                fontsize=6,
+            )
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(y_labels, fontsize=7)
+        ax.set_title(title, fontsize=9)
+        ax.set_xlabel(f"Mean NED ({test_set_label})", fontsize=8)
+        ref_vals = _draw_mlp_ablation_baselines(
+            ax, baselines, ned_col=ned_col, test_set_label=test_set_label
+        )
+        vals = all_neds + ref_vals
+        if vals:
+            lo, hi = min(vals), max(vals)
+            margin = max(0.008, (hi - lo) * 0.22)
+            ax.set_xlim(max(0.0, lo - margin), min(1.0, hi + margin))
+        return all_neds
+
+    # Visual-only panel
+    visual = visual.sort_values(ned_col, ascending=True)
+    visual["_plot_y"] = visual["encoder"].map(_short_encoder)
+    visual_y = visual["_plot_y"].astype(str).tolist()
+    _panel(axes[0], visual, visual_y, title="Visual-only")
+
+    # Layout-only panel
+    layout = layout.sort_values(ned_col, ascending=True)
+    layout["_plot_y"] = layout.apply(
+        lambda r: f"{_short_encoder(r['encoder'])} ({MLP_LABEL_PRETTY.get(str(r['label_type']), r['label_type'])})",
+        axis=1,
+    )
+    layout_y = layout["_plot_y"].astype(str).tolist()
+    _panel(axes[1], layout, layout_y, title="Layout-only")
+
+    # Combo panel — one bar per config, sorted by NED
+    combo = combo.copy()
+    if "config_id" in combo.columns:
+        combo["_plot_y"] = combo["config_id"].astype(str).str.replace("combo|", "", regex=False)
+    else:
+        combo["_plot_y"] = combo.apply(_validation_combo_bar_label, axis=1)
+    combo["_fusion_kind"] = combo["feature_fusion"].astype(str)
+    combo = combo.sort_values(["_fusion_kind", ned_col], ascending=[True, True])
+    combo_y = combo["_plot_y"].astype(str).tolist()
+    combo_colors = []
+    for fusion, mode in zip(combo["feature_fusion"].astype(str), combo["feature_mode"].astype(str)):
+        if fusion == "weighted_avg":
+            combo_colors.append("#59a14f" if mode == "image_layout" else "#8cd17d")
+        elif mode == "all":
+            combo_colors.append("#dd8452")
+        else:
+            combo_colors.append("#4c72b0")
+    _panel(
+        axes[2],
+        combo,
+        combo_y,
+        title="Combinations (blue/orange=norm_concat, green=weighted_avg proj)",
+        color_by_label=False,
+        bar_colors=combo_colors,
+    )
+
+    handles = [
+        plt.Line2D([0], [0], color="#4c72b0", lw=6, label="norm_concat"),
+        plt.Line2D([0], [0], color="#dd8452", lw=6, label="norm_concat + metadata"),
+        plt.Line2D([0], [0], color="#59a14f", lw=6, label="weighted_avg (proj)"),
+        plt.Line2D([0], [0], color="#8cd17d", lw=6, label="weighted_avg (proj) + metadata"),
+    ]
+    for lt in _active_mlp_label_order(mlp):
+        handles.append(
+            plt.Line2D(
+                [0],
+                [0],
+                color=MLP_LABEL_COLORS.get(lt, "#999"),
+                lw=6,
+                label=MLP_LABEL_PRETTY.get(lt, lt),
+            )
+        )
+    fig.legend(handles=handles, loc="lower center", ncol=4, fontsize=7, frameon=False)
+    fig.suptitle(f"Validation shortlist ({test_set_label})", fontsize=11, y=1.01)
+    plt.tight_layout(rect=(0, 0.06, 1, 1))
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_routing_results(
     summaries: list[dict],
     oracle_ned: float,

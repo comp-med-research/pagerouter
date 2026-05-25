@@ -4,7 +4,10 @@ Supported **pre-MLP** (no extra parameters, applied in ``mlp_features``):
 
 - ``concat`` — concatenate modality vectors (baseline).
 - ``norm_concat`` — L2-normalize each continuous block, then concatenate.
-- ``weighted_avg`` — L2-normalize each of two embeddings and take the arithmetic mean (requires equal dim).
+- ``weighted_avg`` — L2-normalize each of two embeddings and take the arithmetic mean.
+  When dims match, this is applied in ``mlp_features`` (no extra params). When dims
+  differ, ``WeightedAvgFusionRouter`` linearly projects both modalities to a common
+  dimension, L2-normalizes, then averages (trained end-to-end).
 
 **Learned** fusion (applied inside ``train_mlp`` before the classifier MLP; trained end-to-end):
 
@@ -61,6 +64,46 @@ class BilinearFusion(nn.Module):
 
     def forward(self, u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         return self.b(u, v)
+
+
+class WeightedAvgFusionRouter(nn.Module):
+    """Project image/layout to a shared dim, L2-normalize, average, then classify."""
+
+    def __init__(
+        self,
+        *,
+        d_img: int,
+        d_layout: int,
+        d_meta: int,
+        num_classes: int,
+        hidden: int = 256,
+        dropout: float = 0.1,
+        proj_dim: int | None = None,
+    ) -> None:
+        super().__init__()
+        d = int(proj_dim if proj_dim is not None else max(d_img, d_layout))
+        self.d_img = d_img
+        self.d_layout = d_layout
+        self.d_meta = d_meta
+        self.proj_dim = d
+        self.proj_u = nn.Linear(d_img, d)
+        self.proj_v = nn.Linear(d_layout, d)
+        in_dim = d + d_meta
+        self.head = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        u = x[:, : self.d_img]
+        v = x[:, self.d_img : self.d_img + self.d_layout]
+        meta = x[:, self.d_img + self.d_layout :]
+        z = 0.5 * (l2_normalize_rows(self.proj_u(u)) + l2_normalize_rows(self.proj_v(v)))
+        if self.d_meta > 0:
+            z = torch.cat([z, meta], dim=-1)
+        return self.head(z)
 
 
 class FusionMLPRouter(nn.Module):

@@ -72,7 +72,7 @@ from pagerouter.mlp_features import (  # noqa: E402
     build_feature_matrix,
     fit_metadata_columns,
 )
-from pagerouter.multimodal_fusion import FUSION_LABELS, FeatureFusion, FusionMLPRouter  # noqa: E402
+from pagerouter.multimodal_fusion import FUSION_LABELS, FeatureFusion, FusionMLPRouter, WeightedAvgFusionRouter  # noqa: E402
 from pagerouter.routing import MODELS  # noqa: E402
 
 RouterKind = Literal["mlp", "logistic"]
@@ -361,6 +361,13 @@ def main() -> None:
         help="Fusion width for fusion=bilinear (nn.Bilinear D×D→out_dim)",
     )
     ap.add_argument(
+        "--fusion-proj-dim",
+        type=int,
+        default=None,
+        help="Shared projection dim for fusion=weighted_avg when image/layout dims differ "
+        "(default: max(d_img, d_layout))",
+    )
+    ap.add_argument(
         "--test-embeddings",
         type=Path,
         default=None,
@@ -573,6 +580,13 @@ def main() -> None:
     enc_key = _encoder_label(mode, image_enc, layout_enc)
 
     fusion_label = FUSION_LABELS[fusion]
+    if (
+        fusion == "weighted_avg"
+        and train_image_raw is not None
+        and train_layout_raw is not None
+        and int(train_image_raw.shape[1]) != int(train_layout_raw.shape[1])
+    ):
+        fusion_label = f"{fusion_label} (projected)"
 
     detail_exists = args.detail_csv.is_file()
     stratum_exists = args.stratum_csv.is_file()
@@ -586,6 +600,50 @@ def main() -> None:
                 C=float(args.logistic_C),
             )
             pred_idx = predict_logistic(clf, X_test_z)
+        elif fusion == "weighted_avg" and train_image_raw is not None and train_layout_raw is not None:
+            di, dl = int(train_image_raw.shape[1]), int(train_layout_raw.shape[1])
+            if di == dl:
+                core_model = MLPRouter(X_train_z.shape[1], num_classes, hidden=args.hidden)
+                model = train_one_seed(
+                    X_train_z,
+                    y_aligned,
+                    X_test_z,
+                    model=core_model,
+                    epochs=args.epochs,
+                    batch_size=args.batch_size,
+                    lr=args.lr,
+                    weight_decay=args.weight_decay,
+                    device=device,
+                    seed=seed,
+                )
+                pred_idx = predict_labels(model, X_test_z, device)
+            else:
+                d_meta = int(X_train_z.shape[1] - di - dl)
+                if d_meta < 0:
+                    raise RuntimeError(
+                        "Feature width mismatch between z-scored X and modality slice sizes."
+                    )
+                core_model = WeightedAvgFusionRouter(
+                    d_img=di,
+                    d_layout=dl,
+                    d_meta=d_meta,
+                    num_classes=num_classes,
+                    hidden=args.hidden,
+                    proj_dim=args.fusion_proj_dim,
+                )
+                model = train_one_seed(
+                    X_train_z,
+                    y_aligned,
+                    X_test_z,
+                    model=core_model,
+                    epochs=args.epochs,
+                    batch_size=args.batch_size,
+                    lr=args.lr,
+                    weight_decay=args.weight_decay,
+                    device=device,
+                    seed=seed,
+                )
+                pred_idx = predict_labels(model, X_test_z, device)
         elif fusion in ("gmu", "bilinear"):
             if train_image_raw is None or train_layout_raw is None:
                 raise RuntimeError("Fusion model requires aligned image/layout tensors.")

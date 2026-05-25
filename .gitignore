@@ -12,3 +12,4 @@ venv/
 *.tmp
 *.DS_Store
 *.sh
+pagerouter/vlm_finetune/

@@ -55,6 +55,7 @@ def main() -> None:
         dims[enc] = _emb_dim(path)
 
     rows: list[dict[str, str]] = []
+    combo_keys: set[tuple[str, str, str, str, str]] = set()
 
     for visual, v_label in VISUAL:
         rows.append(
@@ -89,10 +90,10 @@ def main() -> None:
             label_type = v_label
             for fusion in FUSIONS:
                 for mode in COMBO_MODES:
-                    vd, ld = dims[visual], dims[layout]
-                    skip = ""
-                    if fusion == "weighted_avg" and vd != ld:
-                        skip = f"weighted_avg needs equal dim; {visual}={vd} vs {layout}={ld}"
+                    key = (visual, layout, fusion, mode, label_type)
+                    if key in combo_keys:
+                        continue
+                    combo_keys.add(key)
                     rows.append(
                         {
                             "section": "combo",
@@ -104,7 +105,7 @@ def main() -> None:
                             "visual_encoder": visual,
                             "layout_encoder": layout,
                             "label_type": label_type,
-                            "skip_reason": skip,
+                            "skip_reason": "",
                         }
                     )
 
@@ -113,7 +114,7 @@ def main() -> None:
     out.to_csv(args.out_csv, index=False)
 
     n_skip = int((out["skip_reason"] != "").sum())
-    print(f"Wrote {args.out_csv} ({len(out)} rows, {n_skip} skipped combos for weighted_avg)")
+    print(f"Wrote {args.out_csv} ({len(out)} rows, {n_skip} skipped)")
     print(json.dumps(dims, indent=2))
 
 

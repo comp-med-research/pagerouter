@@ -61,6 +61,9 @@ EncoderFamily = Literal[
 ]
 
 
+_INTERNVL_POST_INIT_PATCHED: set[str] = set()
+
+
 def apply_transformers_compat_patches() -> None:
     """Best-effort shims for Jina remote code on newer ``transformers`` builds."""
     try:
@@ -79,6 +82,33 @@ def apply_transformers_compat_patches() -> None:
 
         if "default" not in ROPE_INIT_FUNCTIONS and "linear" in ROPE_INIT_FUNCTIONS:
             ROPE_INIT_FUNCTIONS["default"] = ROPE_INIT_FUNCTIONS["linear"]
+    except Exception:
+        pass
+
+
+def patch_internvl_post_init(hf_model_id: str) -> None:
+    """InternVL remote code omits ``post_init()``; required by recent transformers."""
+    if hf_model_id in _INTERNVL_POST_INIT_PATCHED:
+        return
+    try:
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+        cls = get_class_from_dynamic_module(
+            "modeling_internvl_chat.InternVLChatModel",
+            hf_model_id,
+        )
+        if getattr(cls, "_pagerouter_post_init_patched", False):
+            _INTERNVL_POST_INIT_PATCHED.add(hf_model_id)
+            return
+        orig_init = cls.__init__
+
+        def _init_with_post_init(self: Any, *args: Any, **kwargs: Any) -> None:
+            orig_init(self, *args, **kwargs)
+            self.post_init()
+
+        cls.__init__ = _init_with_post_init  # type: ignore[method-assign]
+        cls._pagerouter_post_init_patched = True
+        _INTERNVL_POST_INIT_PATCHED.add(hf_model_id)
     except Exception:
         pass
 
@@ -180,6 +210,7 @@ def _vlm_dtype(device: torch.device) -> torch.dtype:
 def load_encoder(spec: EncoderSpec, device: torch.device) -> tuple[nn.Module, Any]:
     """Load frozen encoder + processor (``AutoImageProcessor`` or ``AutoProcessor`` for VLMs)."""
     apply_transformers_compat_patches()
+    already_on_device = False
     if spec.family == "qwen3_vl":
         if Qwen3VLForConditionalGeneration is None:
             raise ImportError(
@@ -253,9 +284,10 @@ def load_encoder(spec: EncoderSpec, device: torch.device) -> tuple[nn.Module, An
         model = ColPali.from_pretrained(
             spec.hf_model_id,
             torch_dtype=dtype,
-            low_cpu_mem_usage=True,
+            device_map={"" : device},
         )
         processor = ColPaliProcessor.from_pretrained(spec.hf_model_id)
+        already_on_device = True
     elif spec.family == "nemotron_colembed":
         dtype = _vlm_dtype(device)
         model = AutoModel.from_pretrained(
@@ -274,7 +306,8 @@ def load_encoder(spec: EncoderSpec, device: torch.device) -> tuple[nn.Module, An
         model = AutoModel.from_pretrained(spec.hf_model_id)
         processor = AutoImageProcessor.from_pretrained(spec.hf_model_id)
     model.eval()
-    model.to(device)
+    if not already_on_device:
+        model.to(device)
     for p in model.parameters():
         p.requires_grad = False
     return model, processor

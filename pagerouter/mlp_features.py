@@ -65,7 +65,8 @@ def build_feature_matrix(
 
     - ``concat`` — ``[img | lay | (meta)]`` (baseline).
     - ``norm_concat`` — L2-normalize img and lay rows, then concatenate.
-    - ``weighted_avg`` — mean of normalized img and lay (needs equal embedding dim).
+    - ``weighted_avg`` — mean of normalized img and lay when dims match; otherwise raw
+      ``img|lay|(meta)`` for ``WeightedAvgFusionRouter`` (learned projection).
     - ``gmu`` / ``bilinear`` — raw ``img|lay|(meta)``; fusion happens inside ``FusionMLPRouter``.
     """
     needs_image = mode in ("image", "image_layout", "image_metadata", "all")
@@ -73,19 +74,21 @@ def build_feature_matrix(
     needs_meta = mode in ("image_metadata", "layout_metadata", "all")
     needs_pair = needs_image and needs_layout
 
-    learned_pair_fusion = fusion in ("gmu", "bilinear")
+    di = dl = 0
+    if needs_pair:
+        assert image is not None and layout is not None
+        di, dl = int(image.shape[1]), int(layout.shape[1])
+
+    learned_pair_fusion = fusion in ("gmu", "bilinear") or (
+        fusion == "weighted_avg" and needs_pair and di != dl
+    )
 
     fused_block: torch.Tensor | None = None
     if needs_pair:
         assert image is not None and layout is not None
-        di, dl = image.shape[1], layout.shape[1]
         if learned_pair_fusion:
             fused_block = None
         elif fusion == "weighted_avg":
-            if di != dl:
-                raise ValueError(
-                    f"fusion=weighted_avg needs image/layout same embedding dim; got {di} vs {dl}"
-                )
             fused_block = 0.5 * (l2_normalize_rows(image) + l2_normalize_rows(layout))
         elif fusion == "norm_concat":
             fused_block = torch.cat([l2_normalize_rows(image), l2_normalize_rows(layout)], dim=1)
