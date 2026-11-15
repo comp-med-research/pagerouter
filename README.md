@@ -43,13 +43,13 @@ pagerouter/
 │   └── …                   # profiles, clustering, oracle (library)
 ├── scripts/
 │   ├── prepare_hard296_pagerouter.py
-│   ├── train_vlm_router.py           # needs local pagerouter/vlm_finetune/
+│   ├── vlm_finetune/       # VLM routing fine-tune (dataset, LoRA, registry)
+│   ├── train_vlm_router.py
 │   ├── aggregate_vlm_finetuned.py
 │   ├── aggregate_validation_shortlist.py
 │   └── run_vlm_router_eval.py
 ├── results/                # gitignored
 ├── figures/                # gitignored
-├── pagerouter/vlm_finetune/  # gitignored (local training code)
 └── tests/
 ```
 
@@ -71,7 +71,7 @@ Prepare hard296 slice (needs rankshift `scores.csv` path on your machine):
 python scripts/prepare_hard296_pagerouter.py --help
 ```
 
-VLM fine-tuning and aggregation use code under `pagerouter/vlm_finetune/` (gitignored on this checkout).
+VLM fine-tuning: `python scripts/train_vlm_router.py --help` (writes under `results/vlm_finetuned/`).
 
 ---
 
@@ -80,5 +80,3 @@ VLM fine-tuning and aggregation use code under `pagerouter/vlm_finetune/` (gitig
 ```bash
 pytest tests/ -q
 ```
-
-(`tests/test_vlm_lora.py` is optional/local when `vlm_finetune/` is present.)
