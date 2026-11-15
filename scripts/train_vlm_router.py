@@ -26,7 +26,7 @@ from pagerouter.evaluate import (  # noqa: E402
 from pagerouter.load import DEFAULT_OMNI, DEFAULT_REAL5, get_matrix, load_predictions  # noqa: E402
 from pagerouter.mlp_labels import model_to_index, per_stratum_labels  # noqa: E402
 from pagerouter.mlp_paths import DEFAULT_IMAGE_ROOT  # noqa: E402
-from pagerouter.routing import MODELS  # noqa: E402
+from pagerouter.agents import MODELS  # noqa: E402
 from pagerouter.vlm_finetune.dataset import PageRouterDataset, collate_pages, page_ids_and_labels  # noqa: E402
 from pagerouter.vlm_finetune.lora import apply_paradigm, trainable_param_count  # noqa: E402
 from pagerouter.vlm_finetune.model import PageRouter, RouterHead, build_page_router  # noqa: E402

@@ -1,7 +1,7 @@
 import pandas as pd
 
 from pagerouter.mlp_labels import per_doc_type_labels, per_page_oracle_labels, per_stratum_labels
-from pagerouter.routing import MODELS
+from pagerouter.agents import MODELS
 
 
 def test_per_page_oracle():

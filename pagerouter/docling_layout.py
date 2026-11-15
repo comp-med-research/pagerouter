@@ -7,7 +7,7 @@ from typing import Any
 import torch
 from PIL import Image
 
-from pagerouter.doclayout import PageDetections, detector_stats_vector
+from pagerouter.detections import PageDetections, detector_stats_vector
 
 HERON_101_MODEL_ID = "docling-project/docling-layout-heron-101"
 

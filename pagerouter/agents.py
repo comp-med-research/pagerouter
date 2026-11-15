@@ -13,7 +13,7 @@ import re
 import time
 from pathlib import Path
 
-# Canonical model names shared with routing.py
+# Canonical parser names (14 models)
 MODELS = [
     "chandra2", "chatgpt_api", "deepseek_ocr_2", "docling_ocr", "dolphin_1_5",
     "dotsocr", "glmocr", "got_ocr2", "hunyuanocr", "mineru_1_2b",

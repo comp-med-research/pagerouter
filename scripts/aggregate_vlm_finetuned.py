@@ -14,7 +14,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from pagerouter import viz  # noqa: E402
 from pagerouter.load import DEFAULT_OMNI, DEFAULT_REAL5, get_matrix, load_predictions  # noqa: E402
 from pagerouter.vlm_finetune.registry import PARADIGM_LABELS, PARADIGMS  # noqa: E402
 
@@ -151,31 +150,8 @@ def _build_split_table(
 
 
 def _plot_split(ablation: pd.DataFrame, split: str, out_path: Path, *, test_label: str) -> None:
-    if ablation.empty:
-        return
-    routers = ablation[ablation["kind"] == "vlm_router"].copy()
-    if routers.empty:
-        return
-    oracle_row = ablation[ablation["model"] == "oracle_upper_bound"]
-    best_fixed_row = ablation[ablation["model"] == "best_fixed_on_test"]
-    oracle_ned = float(oracle_row["mean_ned"].iloc[0]) if not oracle_row.empty else 1.0
-    best_fixed = float(best_fixed_row["mean_ned"].iloc[0]) if not best_fixed_row.empty else None
-
-    summaries = [
-        {
-            "label": f"{r['model']} | {r['paradigm']}",
-            "mean_ned": float(r["mean_ned"]),
-            "oracle_gap_pct": float(r["oracle_gap_recovered"]),
-        }
-        for _, r in routers.iterrows()
-    ]
-    viz.plot_routing_results(
-        summaries,
-        oracle_ned,
-        out_path,
-        best_fixed_ned=best_fixed,
-        test_set_label=test_label,
-    )
+    """Figures live under ``figures/`` (gitignored); CSV aggregates are the source of truth."""
+    _ = (ablation, split, out_path, test_label)
 
 
 def main() -> None:

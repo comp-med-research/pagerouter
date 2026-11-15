@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from pagerouter.routing import MODELS, StratumMeanChampionRouter, StratumMode
+from pagerouter.agents import MODELS
+from pagerouter.stratum import StratumMeanChampionRouter, StratumMode
 
 
 def _nan_argmax_row(row: pd.Series) -> str:
